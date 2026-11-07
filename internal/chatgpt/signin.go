@@ -7,6 +7,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -25,6 +27,50 @@ const signInTimeout = 30 * time.Minute
 
 func signInContext(parent context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(parent, signInTimeout)
+}
+
+// SetSignInDiagnostics enables fixed, value-free sign-in events. Configure it
+// before starting sign-in; nil disables diagnostics. It never logs request data.
+func (c *Client) SetSignInDiagnostics(w io.Writer) {
+	if w == nil {
+		c.signInDiagnostic = nil
+		return
+	}
+	var mu sync.Mutex
+	c.signInDiagnostic = func(event string) {
+		mu.Lock()
+		defer mu.Unlock()
+		_, _ = fmt.Fprintln(w, "chatgpt_signin:"+event)
+	}
+}
+
+func (c *Client) signInEvent(event string) {
+	// Keep this allowlist at the output boundary: even an accidental dynamic
+	// argument must never expose authorization data.
+	switch event {
+	case "listener_ready", "listener_failed", "rejected_method", "rejected_path", "rejected_host", "rejected_state", "rejected_duplicate", "callback_received", "callback_failed", "exchange_started", "canceled", "timed_out":
+		if c.signInDiagnostic != nil {
+			c.signInDiagnostic(event)
+		}
+	}
+}
+
+func serveCallback(server *http.Server, listener net.Listener) <-chan error {
+	done := make(chan error, 1)
+	go func() {
+		_ = server.Serve(listener)
+		// Do not expose the underlying network error, which may contain addresses.
+		done <- errors.New("ChatGPT callback listener stopped before authorization completed")
+	}()
+	return done
+}
+
+func closeCallback(server *http.Server) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if server.Shutdown(ctx) != nil {
+		_ = server.Close()
+	}
 }
 
 // SignIn performs an explicit user-initiated authorization. An empty clientID
@@ -101,22 +147,34 @@ func (c *Client) signIn(ctx context.Context, clientID string, consent bool, show
 		}
 		result := make(chan callback, 1)
 		var once sync.Once
-		server := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server := &http.Server{ReadHeaderTimeout: 5 * time.Second, ErrorLog: log.New(io.Discard, "", 0), Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("Content-Security-Policy", "default-src 'none'")
 			w.Header().Set("Referrer-Policy", "no-referrer")
-			if r.Method != http.MethodGet || r.URL.Path != "/auth/callback" || r.Host != listener.Addr().String() {
+			rejection := ""
+			switch {
+			case r.Method != http.MethodGet:
+				rejection = "rejected_method"
+			case r.URL.Path != "/auth/callback":
+				rejection = "rejected_path"
+			case r.Host != listener.Addr().String():
+				rejection = "rejected_host"
+			}
+			if rejection != "" {
+				c.signInEvent(rejection)
 				http.NotFound(w, r)
 				return
 			}
 			values, err := url.ParseQuery(r.URL.RawQuery)
 			if err != nil || len(values["state"]) != 1 || subtle.ConstantTimeCompare([]byte(values.Get("state")), []byte(state)) != 1 {
+				c.signInEvent("rejected_state")
 				http.Error(w, "Invalid authorization state", 400)
 				return
 			}
 			accepted := false
 			once.Do(func() {
 				accepted = true
+				c.signInEvent("callback_received")
 				v := callback{code: values.Get("code"), id: values.Get("client_id")}
 				switch {
 				case values.Get("error") != "":
@@ -134,23 +192,34 @@ func (c *Client) signIn(ctx context.Context, clientID string, consent bool, show
 				result <- v
 			})
 			if !accepted {
+				c.signInEvent("rejected_duplicate")
 				http.Error(w, "Authorization already received", 400)
 				return
 			}
 			_, _ = w.Write([]byte("Authorization received. Return to Roast to check the result."))
 		})}
-		go func() { _ = server.Serve(listener) }()
-		defer server.Close()
+		serveDone := serveCallback(server, listener)
+		defer closeCallback(server)
+		c.signInEvent("listener_ready")
 		if e = showURL(authorizeURL + "?" + q.Encode()); e != nil {
 			return e
 		}
 		var cb callback
 		select {
 		case <-ctx.Done():
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				c.signInEvent("timed_out")
+			} else {
+				c.signInEvent("canceled")
+			}
 			return ctx.Err()
+		case err := <-serveDone:
+			c.signInEvent("listener_failed")
+			return err
 		case cb = <-result:
 		}
 		if cb.err != nil {
+			c.signInEvent("callback_failed")
 			return cb.err
 		}
 		if clientID == "" {
@@ -173,6 +242,7 @@ func (c *Client) signIn(ctx context.Context, clientID string, consent bool, show
 			}
 		}
 		var t tokenResponse
+		c.signInEvent("exchange_started")
 		if e = c.request(ctx, http.MethodPost, tokenURL, url.Values{"grant_type": {"authorization_code"}, "client_id": {cb.id}, "code": {cb.code}, "code_verifier": {verifier}, "redirect_uri": {redirect}, "resource": {APIBaseURL}}, "", &t); e != nil {
 			return fmt.Errorf("%w; retry sign-in with roast chatgpt signin --account %s", e, cb.id)
 		}

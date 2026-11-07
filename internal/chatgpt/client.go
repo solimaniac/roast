@@ -29,10 +29,11 @@ const (
 )
 
 type Client struct {
-	dir      string
-	selected string
-	http     *http.Client
-	now      func() time.Time
+	signInDiagnostic func(string)
+	dir              string
+	selected         string
+	http             *http.Client
+	now              func() time.Time
 }
 
 // New opens Roast's own registration store under the operating-system config directory.
