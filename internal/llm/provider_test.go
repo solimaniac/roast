@@ -362,22 +362,35 @@ func TestResponsesRetriesOnlyThroughFantasy(t *testing.T) {
 	}
 }
 
-func TestAnthropicMapsAuthenticationFailure(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, `{"type":"error","error":{"type":"authentication_error"}}`, http.StatusUnauthorized)
-	}))
-	defer server.Close()
-	c, err := New(t.Context(), ClientConfig{
-		BaseURL: server.URL + "/v1", APIKey: "bad", Model: "claude-test", Protocol: "anthropic",
-		MaxOutputTokens: 100, MaxAttempts: 1,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out struct{}
-	err = c.CompleteStructured(t.Context(), "system", "user", "verdict", &out)
-	if !errors.Is(err, ErrAuth) {
-		t.Fatalf("error = %v, want ErrAuth", err)
+func TestAPIKeyProvidersMapAuthenticationFailure(t *testing.T) {
+	for _, protocol := range []string{"chat", "responses", "anthropic"} {
+		for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+			t.Run(protocol+"/"+http.StatusText(status), func(t *testing.T) {
+				var calls atomic.Int32
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					calls.Add(1)
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(status)
+					_, _ = w.Write([]byte(`{"type":"error","error":{"type":"authentication_error","message":"invalid credential"}}`))
+				}))
+				defer server.Close()
+				c, err := New(t.Context(), ClientConfig{
+					BaseURL: server.URL + "/v1", APIKey: "bad", Model: "test-model", Protocol: protocol,
+					MaxOutputTokens: 100, MaxAttempts: 3,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var out struct{}
+				err = c.CompleteStructured(t.Context(), "system", "user", "verdict", &out)
+				if !errors.Is(err, ErrAuth) || !strings.Contains(err.Error(), "check the configured API key") {
+					t.Fatalf("error = %v, want ErrAuth with API-key recovery", err)
+				}
+				if got := calls.Load(); got != 1 {
+					t.Fatalf("provider calls = %d, want one authentication failure", got)
+				}
+			})
+		}
 	}
 }
 

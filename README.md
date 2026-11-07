@@ -148,6 +148,9 @@ unsupported versions.
 
 This fork also has a separate `chatgpt` protocol implementing the official
 [Sign in with ChatGPT plan-usage flow](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference).
+**Experimental:** extensive automated tests cover mocked OAuth and inference,
+but live end-to-end direct-plan verification has not yet completed. This backend
+is not production-ready; a passing mock test or Codex CLI check does not verify it.
 Build this fork with Go 1.27.3 or newer (`go build -o roast ./cmd/roast`).
 Direct authentication currently supports Linux and macOS. On Windows it fails
 before reading credentials or starting OAuth, pending native secure-storage
@@ -233,6 +236,11 @@ For troubleshooting, add `--diagnostics` to `signin`. Its diagnostic output on
 stderr contains only fixed phase/rejection events, not request values or
 credentials. Do not share callback URLs or credential files. These events help
 distinguish a missing browser callback from a rejected callback or token exchange.
+In hosted-browser environments, confirm that the browser and Roast's listener
+run on the same host: the redirect must use the exact issued
+`http://127.0.0.1:PORT/auth/callback` URL, including its port and path. A browser
+on another host cannot reach that loopback listener. If no callback arrives,
+diagnostics alone do not establish why the authorization redirect failed.
 
 Roast stores credentials separately under the operating-system user config
 directory's `roast/chatgpt/` subdirectory (for example,
@@ -259,7 +267,8 @@ For a self-hosted VM, follow the official
 run `roast chatgpt prepare-host` on the VM first, then complete OAuth locally
 using Roast for the same user/workspace. The command prints the target store
 path and its nonsecret host ID. Transfer only the selected Roast registration's
-protected credential file over a secure channel such as SSH. Update the VM's
+protected credential file over a secure channel such as SSH, preserving its
+issued client ID and account/workspace context. Update the VM's
 `accounts.json` registration list/active client while preserving its existing
 `host_id`, and retain owner-only permissions. Do not replace the VM's host ID
 with a laptop's ID. The VM must own subsequent refreshes; do not run concurrent

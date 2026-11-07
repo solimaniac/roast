@@ -16,7 +16,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/bluesky-social/roast/internal/buildinfo"
-	"github.com/bluesky-social/roast/internal/chatgpt"
 	"github.com/bluesky-social/roast/internal/config"
 	"github.com/bluesky-social/roast/internal/gate"
 	"github.com/bluesky-social/roast/internal/llm"
@@ -100,21 +99,32 @@ func doctorChecks(ctx context.Context, configPath string) []doctorResult {
 	}
 	results = append(results, doctorResult{"config", doctorPass, fmt.Sprintf("schema version %d", cfg.Version)})
 
-	client := &http.Client{Timeout: 5 * time.Second}
-	for _, name := range []string{"finder", "verifier"} {
+	// Resolve both roles before running either, so a direct verifier is pinned
+	// before even a non-ChatGPT finder's checks can observe a selection change.
+	names := []string{"finder", "verifier"}
+	roles := make([]config.ResolvedRole, len(names))
+	roleErrors := make([]error, len(names))
+	usesChatGPT := false
+	for i, name := range names {
 		role, resolveErr := cfg.ResolveRole(name)
-		if resolveErr != nil {
-			results = append(results, doctorResult{name + "-profile", doctorFail, resolveErr.Error()})
-			continue
-		}
-		if name == "finder" {
+		if resolveErr == nil && name == "finder" {
 			flip, flipErr := cfg.ResolveFinderFlip(role, config.AuthorModel())
-			if flipErr != nil {
-				results = append(results, doctorResult{name + "-profile", doctorFail, flipErr.Error()})
-				continue
-			}
+			resolveErr = flipErr
 			role = flip.Role
 		}
+		roles[i], roleErrors[i] = role, resolveErr
+		usesChatGPT = usesChatGPT || (resolveErr == nil && role.Protocol == "chatgpt")
+	}
+	if usesChatGPT {
+		ctx = llm.WithChatGPTAccount(ctx)
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	for i, name := range names {
+		if roleErrors[i] != nil {
+			results = append(results, doctorResult{name + "-profile", doctorFail, roleErrors[i].Error()})
+			continue
+		}
+		role := roles[i]
 		credential := doctorResult{name + "-credential", doctorPass, role.Credential.String()}
 		if role.Protocol == "codex" {
 			loginContext, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -127,10 +137,7 @@ func doctorChecks(ctx context.Context, configPath string) []doctorResult {
 			}
 		} else if role.Protocol == "chatgpt" {
 			credentialContext, cancel := context.WithTimeout(ctx, 30*time.Second)
-			auth, err := chatgpt.New()
-			if err == nil {
-				_, err = auth.Token(credentialContext)
-			}
+			err := llm.CheckChatGPTLogin(credentialContext)
 			cancel()
 			if err != nil {
 				credential.Status, credential.Detail = doctorFail, err.Error()
@@ -246,11 +253,7 @@ func doctorEndpointCheck(ctx context.Context, client *http.Client, name string, 
 	if role.Protocol == "chatgpt" {
 		catalogContext, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
-		auth, err := chatgpt.New()
-		if err != nil {
-			return doctorResult{name + "-endpoint", doctorFail, err.Error()}
-		}
-		models, err := auth.Models(catalogContext)
+		models, err := llm.ChatGPTModels(catalogContext)
 		if err != nil {
 			return doctorResult{name + "-endpoint", doctorFail, err.Error()}
 		}

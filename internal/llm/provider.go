@@ -366,6 +366,12 @@ func normalizeProviderError(ctx context.Context, modelName string, err error) er
 		return err
 	}
 	if status, ok := errorStatus(err); ok && (status == http.StatusUnauthorized || status == http.StatusForbidden) {
+		var planErr *chatGPTError
+		if errors.As(err, &planErr) {
+			// Direct plan usage has its own OAuth/eligibility recovery. Preserve
+			// that error and never suggest an API key for this route.
+			return fmt.Errorf("%w: %w", ErrAuth, err)
+		}
 		return fmt.Errorf("%w: %v; check the configured API key", ErrAuth, err)
 	}
 	return fmt.Errorf("%w: %s: %w", ErrEndpoint, modelName, err)
