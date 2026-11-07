@@ -213,7 +213,7 @@ func codexArgs(model, dir, schema string) []string {
 		`features.apps=false`, `features.multi_agent=false`, `features.browser_use=false`,
 		`features.computer_use=false`, `features.browser_use_external=false`, `features.memories=false`, `features.skill_search=false`,
 		`features.remote_plugin=false`, `features.view_image=false`, `features.image_generation=false`,
-		`features.sleep_tool=false`, `features.tool_suggest=false`, `features.skip_host_skill_discovery=true`,
+		`features.sleep_tool=false`, `features.tool_suggest=false`,
 		`skills.include_instructions=false`, `skills.bundled.enabled=false`,
 		`tools.update_plan.enabled=false`, `tools.experimental_request_user_input.enabled=false`,
 		"sqlite_home=" + strconv.Quote(dir), "log_dir=" + strconv.Quote(dir),
@@ -224,11 +224,12 @@ func codexArgs(model, dir, schema string) []string {
 }
 
 // Pass only the operating-system environment needed to launch Codex and locate
-// its own login. In particular, never inherit API keys, endpoint overrides,
+// its own login, including the host's existing network proxy routing.
+// In particular, never inherit API keys, endpoint overrides,
 // injected configuration, unrelated application credentials, or session IDs.
 func codexEnvironment() []string {
 	var result []string
-	for _, name := range []string{"PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "TMPDIR", "CODEX_HOME", "SSL_CERT_FILE", "SSL_CERT_DIR", "LANG", "LC_ALL"} {
+	for _, name := range []string{"PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "TMPDIR", "CODEX_HOME", "SSL_CERT_FILE", "SSL_CERT_DIR", "LANG", "LC_ALL", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"} {
 		if value, ok := os.LookupEnv(name); ok {
 			result = append(result, name+"="+value)
 		}
@@ -282,7 +283,7 @@ func parseCodexEvents(data []byte, names map[string]bool) (codexToolCall, fantas
 				}
 			case "reasoning": // Reasoning is not recorded by this adapter.
 			default:
-				return result, usage, errors.New("codex attempted a native tool or emitted an unsupported item; no Roast tool was dispatched")
+				return result, usage, errors.New("codex emitted a native-tool or unsupported item; no Roast tool was dispatched")
 			}
 		case "turn.completed":
 			if event.Usage == nil || event.Usage.Input == nil || event.Usage.Cached == nil || event.Usage.Output == nil || *event.Usage.Input < 0 || *event.Usage.Cached < 0 || *event.Usage.Output < 0 || *event.Usage.Cached > *event.Usage.Input {

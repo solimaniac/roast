@@ -122,6 +122,7 @@ func TestCodexLaunchIsIsolatedAndSubscriptionOnly(t *testing.T) {
 	t.Setenv("CODEX_API_KEY", "must-not-leak")
 	t.Setenv("OPENAI_BASE_URL", "https://attacker.invalid")
 	t.Setenv("CODEX_HOME", "/approved/codex")
+	t.Setenv("HTTPS_PROXY", "http://managed-proxy.invalid:8080")
 	t.Setenv("UNRELATED_SECRET", "must-not-leak")
 	for _, entry := range codexEnvironment() {
 		if strings.Contains(entry, "must-not-leak") || strings.Contains(entry, "attacker") {
@@ -130,6 +131,9 @@ func TestCodexLaunchIsIsolatedAndSubscriptionOnly(t *testing.T) {
 	}
 	if !slices.Contains(codexEnvironment(), "CODEX_HOME=/approved/codex") {
 		t.Fatal("CLI cannot locate its own login")
+	}
+	if !slices.Contains(codexEnvironment(), "HTTPS_PROXY=http://managed-proxy.invalid:8080") {
+		t.Fatal("host network routing was not preserved")
 	}
 	args := codexArgs("test", "/isolated", "/isolated/schema.json")
 	for _, arg := range []string{"--ignore-user-config", "--ephemeral", "read-only", `forced_login_method="chatgpt"`, `model_provider="openai"`, `features.shell_tool=false`, `features.hooks=false`, `features.plugins=false`, `features.apps=false`, `web_search="disabled"`, `project_doc_max_bytes=0`} {
