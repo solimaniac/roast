@@ -240,3 +240,16 @@ func TestCodexMissingExecutableIsNotAuthenticationError(t *testing.T) {
 		t.Fatalf("error=%v", err)
 	}
 }
+
+func TestCodexLoginTimeoutBoundsLauncherPipes(t *testing.T) {
+	fakeCodex(t, "sleep 3 &\nwait\n")
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if err := CheckCodexLogin(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error=%v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2500*time.Millisecond {
+		t.Fatalf("login check waited for a descendant's pipe: %v", elapsed)
+	}
+}
