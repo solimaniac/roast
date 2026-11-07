@@ -92,7 +92,7 @@ export ROAST_VERIFIER_MODEL='verifier-model'
 export ROAST_VERIFIER_PROTOCOL='responses'
 ```
 
-Protocols are `chat`, `responses`, and `anthropic` (native Messages, which
+HTTP protocols are `chat`, `responses`, and `anthropic` (native Messages, which
 authenticates with `x-api-key` and defaults to `https://api.anthropic.com/v1`):
 
 ```sh
@@ -101,7 +101,7 @@ export ROAST_FINDER_MODEL='claude-model-name'
 export ROAST_FINDER_PROTOCOL='anthropic'
 ```
 
-Any base URL works, so a role can point at a hosted provider, a gateway, or a
+For HTTP protocols, any base URL works, so a role can point at a hosted provider, a gateway, or a
 local server that implements the selected protocol.
 
 ### Config file
@@ -144,10 +144,61 @@ preferable. `version: 1` is required for new configs; Roast migrates its two
 legacy unversioned formats in memory, and rejects unknown fields and
 unsupported versions.
 
+### Codex with a ChatGPT login
+
+Install the official [Codex CLI](https://developers.openai.com/codex/cli/),
+then run `codex login` and choose ChatGPT sign-in. Roast uses the CLI's managed
+login, not an OpenAI API key. Choose a model available to your ChatGPT account:
+
+```yaml
+version: 1
+inference_profiles:
+  chatgpt:
+    protocol: codex
+    model: gpt-model-name
+    max_output_tokens: 32768
+roles:
+  finder:
+    profile: chatgpt
+  verifier:
+    profile: chatgpt
+```
+
+Run `roast doctor --config /path/to/config.yaml` to check the CLI's ChatGPT
+login and exercise the two-turn tool loop. The CLI must be on `PATH`.
+Use a recent official CLI with `exec --ignore-user-config`, `--ephemeral`,
+`--json`, and `--output-schema` support. Roast launches each call in a fresh
+private temporary directory with the read-only sandbox. User configuration,
+project instructions, native shell/browser/image tools, plugins, and hooks are
+disabled. Only Roast's existing scoped tools supply review context; native-tool
+output is rejected rather than accepted as a review result. Full conversation
+history is replayed for each call, which can be slower and consume more of your
+subscription allowance than a single interactive Codex session.
+
+The CLI needs a writable runtime home even with ephemeral sessions. If your
+host's existing Codex installation is read-only, use a separate writable
+`CODEX_HOME` and complete the official `codex login --device-auth` flow there.
+Do not copy authentication files or tokens from another installation. Roast
+inherits `CODEX_HOME`, but never initiates login or creates credentials itself.
+A Codex profile must omit `endpoint`, `api_key`, `api_key_env`, and
+`session_header`. Role API-key and endpoint overrides are rejected too.
+`OPENAI_API_KEY` and `OPENAI_BASE_URL` do not affect this protocol.
+The provenance endpoint `codex://chatgpt` is a label, not an HTTP endpoint or
+a configurable proxy. Credential kind `codex_login` means CLI-managed login;
+configuration resolution alone does not verify login or account entitlement.
+Roast never reads, extracts, or copies the CLI's login tokens.
+
+For Codex, `max_output_tokens` is a conservative estimate for admitting a call
+against Roast's token budget, not a hard generation ceiling. The CLI does not
+expose that per-call cap. Roast's token budget is a soft limit and may be
+exceeded by a call already in flight. Codex CLI/model limits and ChatGPT
+account usage limits still apply. Doctor permits up to 120 seconds per call
+and 250 seconds for each role's two-turn probe.
+
 ### Credentials and precedence
 
 Command-line role flags override `ROAST_FINDER_*` / `ROAST_VERIFIER_*`
-variables, which override profiles. A role's credential is the first of:
+variables, which override profiles. For HTTP protocols, a role's credential is the first of:
 
 1. `ROAST_FINDER_API_KEY` or `ROAST_VERIFIER_API_KEY`;
 2. the profile's `api_key_env` or `api_key`;

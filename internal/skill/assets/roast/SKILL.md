@@ -25,6 +25,11 @@ the profile example in the Configure section of the Roast README
 operator supplies. A profile selects an endpoint, model, wire protocol
 (`responses`, `chat`, or `anthropic`), credential environment variable, and
 output limit. The finder and verifier may use different profiles and protocols.
+The `codex` protocol uses the official Codex CLI ChatGPT login, with no endpoint,
+API key, key environment variable, or session header. Run `codex login` for
+setup and `roast doctor` to verify it; never extract login tokens. For Codex,
+`max_output_tokens` is an admission estimate, not a hard cap, and token budgets
+are soft limits. ChatGPT account and Codex model limits still apply.
 
 `roast skill install` installs this skill into the shared Agent Skills location
 and any detected Claude Code or Polytoken installation. `roast skill status`

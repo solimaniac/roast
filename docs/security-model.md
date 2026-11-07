@@ -12,6 +12,35 @@ does not load repository-local configuration. A checked-out repository therefore
 cannot select a network destination or credential merely by adding a config
 file.
 
+## Codex CLI and ChatGPT login
+
+The opt-in `codex` protocol sends review prompts and selected repository
+material through the official Codex CLI using its ChatGPT login. The CLI and
+its installation are trusted dependencies. Roast does not extract or copy
+OAuth/session tokens, and does not use API credentials for this route.
+`codex://chatgpt` records this CLI-managed destination in provenance; it is not
+an HTTP service or a user-configurable endpoint. `codex_login` describes the
+credential mechanism without claiming that a login has been verified.
+`roast doctor` asks the CLI to check login and runs a synthetic two-turn probe.
+
+Each inference subprocess receives an allowlisted operating-system environment,
+a fresh private temporary working directory, no user config or project docs,
+read-only sandboxing, and disabled shell, browser, image, plugin, and hook
+features. Roast sends the prompt on stdin instead of command-line arguments.
+Subprocess output is bounded, raw diagnostics are never surfaced, and native
+tool events or incomplete responses are rejected before Roast dispatches a tool.
+Run capture stores only the final tool envelope and usage, not CLI session IDs
+or raw diagnostic events. Temporary prompt/schema/runtime artifacts are removed
+at the end of the call. The CLI remains responsible for its login storage and
+may need to update its own runtime home; use a writable installation.
+
+Codex profiles reject explicit endpoints, API keys, key environment variables,
+and session headers. Endpoint and role API-key overrides are rejected;
+ambient OpenAI API credentials and base URLs are ignored. Set up login with
+`codex login`, outside Roast. ChatGPT plan/model access and usage limits apply.
+For this protocol `max_output_tokens` is only an admission estimate: the CLI
+cannot enforce Roast's output-token ceiling, and token budgets are soft limits.
+
 ## Configuration templates
 
 An organization can publish a configuration template at a URL. A template is

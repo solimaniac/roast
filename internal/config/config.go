@@ -28,6 +28,9 @@ const (
 
 // DefaultBaseURL returns the public default endpoint for a wire protocol.
 func DefaultBaseURL(protocol string) string {
+	if protocol == "codex" {
+		return "codex://chatgpt"
+	}
 	if protocol == "anthropic" {
 		return defaultAnthropicBaseURL
 	}
@@ -88,6 +91,7 @@ const (
 	CredentialProfileKey  = "profile_api_key"
 	CredentialProviderEnv = "provider_env"
 	CredentialNone        = "none"
+	CredentialCodexLogin  = "codex_login"
 )
 
 // CredentialSource describes where a role's credential came from without
@@ -103,6 +107,8 @@ type CredentialSource struct {
 
 func (s CredentialSource) String() string {
 	switch s.Kind {
+	case CredentialCodexLogin:
+		return "Codex CLI-managed ChatGPT login (not verified)"
 	case CredentialRoleEnv:
 		return s.Env + " (role override)"
 	case CredentialProfileEnv:
@@ -515,6 +521,11 @@ func normalizeProfile(name string, profile InferenceProfile) (InferenceProfile, 
 	if profile.MaxOutputTokens == 0 {
 		profile.MaxOutputTokens = 32768
 	}
+	if profile.Protocol == "codex" {
+		if profile.BaseURL != "" || profile.APIKey != "" || profile.APIKeyEnv != "" || profile.SessionHeader != "" {
+			return InferenceProfile{}, fmt.Errorf("inference_profiles.%s: codex requires no endpoint, api_key, api_key_env, or session_header", name)
+		}
+	}
 	if profile.APIKey != "" && profile.APIKeyEnv != "" {
 		return InferenceProfile{}, fmt.Errorf("inference_profiles.%s cannot set both api_key and api_key_env", name)
 	}
@@ -578,6 +589,9 @@ func (p InferenceProfile) Endpoint() string {
 // DescribeEndpoint states where the profile sends requests, including the
 // ambient base URL that replaces an unset endpoint.
 func (p InferenceProfile) DescribeEndpoint() string {
+	if p.Protocol == "codex" {
+		return "codex://chatgpt (Codex CLI-managed ChatGPT service)"
+	}
 	if p.BaseURL != "" {
 		return p.BaseURL
 	}
@@ -587,6 +601,9 @@ func (p InferenceProfile) DescribeEndpoint() string {
 // DescribeCredential states, without resolving any secret, where the profile
 // obtains its credential when selected for role.
 func (p InferenceProfile) DescribeCredential(role string) string {
+	if p.Protocol == "codex" {
+		return (CredentialSource{Kind: CredentialCodexLogin}).String()
+	}
 	roleVar := roleEnvPrefix(role) + "API_KEY"
 	keyVar := providerAPIKeyEnv(p.Protocol)
 	switch {
@@ -637,6 +654,9 @@ func (c Config) resolveProfile(roleName, profileName string, selection Role) (Re
 	crossedProvider, err := applyRoleEnv(roleName, &role)
 	if err != nil {
 		return ResolvedRole{}, err
+	}
+	if role.Protocol == "codex" && (profile.BaseURL != "" || profile.APIKey != "" || profile.APIKeyEnv != "" || profile.SessionHeader != "" || os.Getenv(roleEnvPrefix(roleName)+"BASE_URL") != "" || os.Getenv(roleEnvPrefix(roleName)+"API_KEY") != "") {
+		return ResolvedRole{}, fmt.Errorf("%s: codex does not accept endpoints, API keys, or session headers", roleName)
 	}
 	role.APIKey, role.Credential = resolveCredential(roleName, profile, role, crossedProvider)
 	return role, nil
@@ -689,6 +709,9 @@ func resolveCredential(roleName string, profile InferenceProfile, role ResolvedR
 // endpoint is that provider's default endpoint or the base URL the same
 // environment pairs with the key.
 func ambientCredential(protocol, endpoint string) (string, CredentialSource) {
+	if protocol == "codex" {
+		return "", CredentialSource{Kind: CredentialCodexLogin}
+	}
 	keyVar := providerAPIKeyEnv(protocol)
 	value := os.Getenv(keyVar)
 	if value == "" {
@@ -706,6 +729,9 @@ func ambientCredential(protocol, endpoint string) (string, CredentialSource) {
 // implicitEndpoint is the endpoint of a role that chose none: the ambient
 // provider base URL for protocol, or the protocol's public default.
 func implicitEndpoint(protocol string) string {
+	if protocol == "codex" {
+		return DefaultBaseURL(protocol)
+	}
 	if value := os.Getenv(providerBaseURLEnv(protocol)); value != "" {
 		return value
 	}
@@ -755,6 +781,19 @@ func OverrideEndpoint(roleName string, role ResolvedRole, baseURL, protocol *str
 // against the new endpoint and protocol. When crossedProvider is true, the
 // profile's credential stays with the provider it was configured for.
 func rebindCredential(roleName string, role ResolvedRole, crossedProvider bool) ResolvedRole {
+	if role.Protocol == "codex" {
+		if value := os.Getenv(roleEnvPrefix(roleName) + "API_KEY"); value != "" {
+			role.APIKey, role.Credential = value, CredentialSource{Kind: CredentialRoleEnv, Env: roleEnvPrefix(roleName) + "API_KEY"}
+			return role
+		}
+		if role.Credential.Kind == CredentialProfileEnv || role.Credential.Kind == CredentialProfileKey || role.Credential.Kind == CredentialRoleEnv {
+			return role
+		}
+		if role.APIKey == "" || role.Credential.Kind == CredentialProviderEnv {
+			role.APIKey, role.Credential = ambientCredential("codex", role.BaseURL)
+		}
+		return role
+	}
 	switch role.Credential.Kind {
 	case CredentialRoleEnv:
 		return role
@@ -911,6 +950,12 @@ func ValidateRole(name string, role ResolvedRole) error {
 	if strings.TrimSpace(role.Model) == "" {
 		return fmt.Errorf("%s model is not configured (set inference_profiles.%s.model or ROAST_%s_MODEL)", name, role.Profile, strings.ToUpper(name))
 	}
+	if role.Protocol == "codex" {
+		if role.APIKey != "" || role.ExplicitEndpoint || role.SessionHeader != "" || role.Credential.Kind == CredentialProfileEnv || role.Credential.Kind == CredentialProfileKey || role.Credential.Kind == CredentialRoleEnv {
+			return fmt.Errorf("%s: codex does not accept endpoints, API keys, or session headers", name)
+		}
+		return validateEndpoint(name, role.BaseURL, role.Protocol, role.MaxOutputTokens)
+	}
 	if strings.TrimSpace(role.APIKey) == "" {
 		roleVar := roleEnvPrefix(name) + "API_KEY"
 		switch {
@@ -926,6 +971,15 @@ func ValidateRole(name string, role ResolvedRole) error {
 }
 
 func validateEndpoint(name, baseURL, protocol string, maxOutputTokens int) error {
+	if protocol == "codex" {
+		if baseURL != "codex://chatgpt" {
+			return fmt.Errorf("%s: codex endpoint must be the CLI-managed codex://chatgpt sentinel", name)
+		}
+		if maxOutputTokens <= 0 {
+			return fmt.Errorf("%s max_output_tokens must be positive", name)
+		}
+		return nil
+	}
 	u, err := url.Parse(baseURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return fmt.Errorf("%s endpoint must be an http(s) URL without credentials, a query, or a fragment", name)
@@ -933,7 +987,7 @@ func validateEndpoint(name, baseURL, protocol string, maxOutputTokens int) error
 	switch protocol {
 	case "chat", "responses", "anthropic":
 	default:
-		return fmt.Errorf("%s protocol must be chat, responses, or anthropic", name)
+		return fmt.Errorf("%s protocol must be chat, responses, anthropic, or codex", name)
 	}
 	if maxOutputTokens <= 0 {
 		return fmt.Errorf("%s max_output_tokens must be positive", name)
