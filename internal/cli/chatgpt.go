@@ -15,10 +15,14 @@ func newChatGPTCommand(stdout io.Writer) *cobra.Command {
 	root := &cobra.Command{Use: "chatgpt", Short: "Manage Roast's independent ChatGPT plan connection"}
 	var account string
 	var enablePlan bool
+	var diagnostics bool
 	signin := &cobra.Command{Use: "signin", Aliases: []string{"login"}, Short: "Continue with ChatGPT (authorize plan access in your browser)", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		c, e := chatgpt.New()
 		if e != nil {
 			return e
+		}
+		if diagnostics {
+			c.SetSignInDiagnostics(cmd.ErrOrStderr())
 		}
 		signin := c.SignIn
 		if enablePlan {
@@ -33,6 +37,7 @@ func newChatGPTCommand(stdout io.Writer) *cobra.Command {
 		}
 		return e
 	}}
+	signin.Flags().BoolVar(&diagnostics, "diagnostics", false, "Report fixed sign-in phases without authorization data")
 	signin.Flags().BoolVar(&enablePlan, "enable-plan", false, "Explicitly request consent to enable plan usage for --account")
 	signin.Flags().StringVar(&account, "account", "", "Reauthorize an existing issued client ID instead of registering a new account")
 	status := &cobra.Command{Use: "status", Short: "List saved accounts and the active registration", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {

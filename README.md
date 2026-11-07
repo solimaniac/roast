@@ -229,6 +229,11 @@ blocks inference. Only an explicit
 30 minutes for browser interaction; cancellation or an earlier caller deadline
 still ends the attempt.
 
+For troubleshooting, add `--diagnostics` to `signin`. Its diagnostic output on
+stderr contains only fixed phase/rejection events, not request values or
+credentials. Do not share callback URLs or credential files. These events help
+distinguish a missing browser callback from a rejected callback or token exchange.
+
 Roast stores credentials separately under the operating-system user config
 directory's `roast/chatgpt/` subdirectory (for example,
 `~/.config/roast/chatgpt/` on Linux). `accounts.json` records the stable host ID,
