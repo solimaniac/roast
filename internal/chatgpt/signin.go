@@ -19,6 +19,14 @@ import (
 	"unicode/utf8"
 )
 
+// signInTimeout bounds browser interaction while allowing time for a user to
+// complete a secure login handoff. Earlier caller deadlines and cancellation win.
+const signInTimeout = 30 * time.Minute
+
+func signInContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, signInTimeout)
+}
+
 // SignIn performs an explicit user-initiated authorization. An empty clientID
 // registers a new account; a saved ID reauthorizes that registration. showURL
 // receives a browser URL containing no saved ID token or other credential.
@@ -35,7 +43,7 @@ func (c *Client) EnablePlan(ctx context.Context, clientID string, showURL func(s
 }
 
 func (c *Client) signIn(ctx context.Context, clientID string, consent bool, showURL func(string) error) error {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	ctx, cancel := signInContext(ctx)
 	defer cancel()
 	return c.locked(ctx, func() error {
 		i, e := c.loadIndex()

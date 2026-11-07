@@ -225,7 +225,9 @@ Each running model client pins its selected registration. Use
 If identity sign-in succeeds without plan permission, Roast retains it but
 blocks inference. Only an explicit
 `roast chatgpt signin --account CLIENT_ID --enable-plan` asks for renewed consent.
-`login` is an alias for `signin`.
+`login` is an alias for `signin`. Sign-in and renewed consent allow up to
+30 minutes for browser interaction; cancellation or an earlier caller deadline
+still ends the attempt.
 
 Roast stores credentials separately under the operating-system user config
 directory's `roast/chatgpt/` subdirectory (for example,
