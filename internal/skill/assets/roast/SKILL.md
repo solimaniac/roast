@@ -31,6 +31,16 @@ setup and `roast doctor` to verify it; never extract login tokens. For Codex,
 `max_output_tokens` is an admission estimate, not a hard cap, and token budgets
 are soft limits. ChatGPT account and Codex model limits still apply.
 
+The fork's `chatgpt` protocol uses a separate official Sign in with ChatGPT
+registration and direct public Responses API calls, keeping Roast's native
+prompt and tool loop. Explicitly authorize with `roast chatgpt signin`, list
+account-available slugs with `roast chatgpt models`, then run `roast doctor` for
+live two-turn probes. Never read Codex tokens or silently use API billing.
+Like Codex mode, `max_output_tokens` is only an admission estimate here; the
+plan-usage preview rejects a hard generation cap. Raw SSE and finalized reasoning
+history are retained. Direct sign-in supports Linux/macOS, not Windows yet.
+A configured profile, saved login, or mock test is not a live validation.
+
 `roast skill install` installs this skill into the shared Agent Skills location
 and any detected Claude Code or Polytoken installation. `roast skill status`
 reports whether each installed copy matches the binary. On the first interactive

@@ -86,12 +86,13 @@ type ResolvedRole struct {
 
 // Credential source kinds, in resolution order.
 const (
-	CredentialRoleEnv     = "role_env"
-	CredentialProfileEnv  = "profile_env"
-	CredentialProfileKey  = "profile_api_key"
-	CredentialProviderEnv = "provider_env"
-	CredentialNone        = "none"
-	CredentialCodexLogin  = "codex_login"
+	CredentialRoleEnv      = "role_env"
+	CredentialProfileEnv   = "profile_env"
+	CredentialProfileKey   = "profile_api_key"
+	CredentialProviderEnv  = "provider_env"
+	CredentialNone         = "none"
+	CredentialCodexLogin   = "codex_login"
+	CredentialChatGPTLogin = "chatgpt_login"
 )
 
 // CredentialSource describes where a role's credential came from without
@@ -107,6 +108,8 @@ type CredentialSource struct {
 
 func (s CredentialSource) String() string {
 	switch s.Kind {
+	case CredentialChatGPTLogin:
+		return "Roast-managed Sign in with ChatGPT (not verified)"
 	case CredentialCodexLogin:
 		return "Codex CLI-managed ChatGPT login (not verified)"
 	case CredentialRoleEnv:
@@ -521,9 +524,9 @@ func normalizeProfile(name string, profile InferenceProfile) (InferenceProfile, 
 	if profile.MaxOutputTokens == 0 {
 		profile.MaxOutputTokens = 32768
 	}
-	if profile.Protocol == "codex" {
+	if managedLogin(profile.Protocol) {
 		if profile.BaseURL != "" || profile.APIKey != "" || profile.APIKeyEnv != "" || profile.SessionHeader != "" {
-			return InferenceProfile{}, fmt.Errorf("inference_profiles.%s: codex requires no endpoint, api_key, api_key_env, or session_header", name)
+			return InferenceProfile{}, fmt.Errorf("inference_profiles.%s: %s requires no endpoint, api_key, api_key_env, or session_header", name, profile.Protocol)
 		}
 	}
 	if profile.APIKey != "" && profile.APIKeyEnv != "" {
@@ -589,6 +592,9 @@ func (p InferenceProfile) Endpoint() string {
 // DescribeEndpoint states where the profile sends requests, including the
 // ambient base URL that replaces an unset endpoint.
 func (p InferenceProfile) DescribeEndpoint() string {
+	if p.Protocol == "chatgpt" {
+		return defaultOpenAIBaseURL + " (ChatGPT plan usage; fixed public endpoint)"
+	}
 	if p.Protocol == "codex" {
 		return "codex://chatgpt (Codex CLI-managed ChatGPT service)"
 	}
@@ -601,6 +607,9 @@ func (p InferenceProfile) DescribeEndpoint() string {
 // DescribeCredential states, without resolving any secret, where the profile
 // obtains its credential when selected for role.
 func (p InferenceProfile) DescribeCredential(role string) string {
+	if p.Protocol == "chatgpt" {
+		return (CredentialSource{Kind: CredentialChatGPTLogin}).String()
+	}
 	if p.Protocol == "codex" {
 		return (CredentialSource{Kind: CredentialCodexLogin}).String()
 	}
@@ -655,8 +664,8 @@ func (c Config) resolveProfile(roleName, profileName string, selection Role) (Re
 	if err != nil {
 		return ResolvedRole{}, err
 	}
-	if role.Protocol == "codex" && (profile.BaseURL != "" || profile.APIKey != "" || profile.APIKeyEnv != "" || profile.SessionHeader != "" || os.Getenv(roleEnvPrefix(roleName)+"BASE_URL") != "" || os.Getenv(roleEnvPrefix(roleName)+"API_KEY") != "") {
-		return ResolvedRole{}, fmt.Errorf("%s: codex does not accept endpoints, API keys, or session headers", roleName)
+	if managedLogin(role.Protocol) && (profile.BaseURL != "" || profile.APIKey != "" || profile.APIKeyEnv != "" || profile.SessionHeader != "" || os.Getenv(roleEnvPrefix(roleName)+"BASE_URL") != "" || os.Getenv(roleEnvPrefix(roleName)+"API_KEY") != "") {
+		return ResolvedRole{}, fmt.Errorf("%s: %s does not accept endpoints, API keys, or session headers", roleName, role.Protocol)
 	}
 	role.APIKey, role.Credential = resolveCredential(roleName, profile, role, crossedProvider)
 	return role, nil
@@ -709,6 +718,9 @@ func resolveCredential(roleName string, profile InferenceProfile, role ResolvedR
 // endpoint is that provider's default endpoint or the base URL the same
 // environment pairs with the key.
 func ambientCredential(protocol, endpoint string) (string, CredentialSource) {
+	if protocol == "chatgpt" {
+		return "", CredentialSource{Kind: CredentialChatGPTLogin}
+	}
 	if protocol == "codex" {
 		return "", CredentialSource{Kind: CredentialCodexLogin}
 	}
@@ -729,7 +741,7 @@ func ambientCredential(protocol, endpoint string) (string, CredentialSource) {
 // implicitEndpoint is the endpoint of a role that chose none: the ambient
 // provider base URL for protocol, or the protocol's public default.
 func implicitEndpoint(protocol string) string {
-	if protocol == "codex" {
+	if managedLogin(protocol) {
 		return DefaultBaseURL(protocol)
 	}
 	if value := os.Getenv(providerBaseURLEnv(protocol)); value != "" {
@@ -750,7 +762,7 @@ func applyEndpointOverrides(role *ResolvedRole, baseURL, protocol *string) bool 
 	if protocol != nil {
 		previous := DefaultBaseURL(role.Protocol)
 		role.Protocol = *protocol
-		if next := DefaultBaseURL(*protocol); next != previous {
+		if next := DefaultBaseURL(*protocol); next != previous || managedLogin(*protocol) {
 			switch {
 			case !role.ExplicitEndpoint:
 				role.BaseURL = implicitEndpoint(*protocol)
@@ -781,7 +793,7 @@ func OverrideEndpoint(roleName string, role ResolvedRole, baseURL, protocol *str
 // against the new endpoint and protocol. When crossedProvider is true, the
 // profile's credential stays with the provider it was configured for.
 func rebindCredential(roleName string, role ResolvedRole, crossedProvider bool) ResolvedRole {
-	if role.Protocol == "codex" {
+	if managedLogin(role.Protocol) {
 		if value := os.Getenv(roleEnvPrefix(roleName) + "API_KEY"); value != "" {
 			role.APIKey, role.Credential = value, CredentialSource{Kind: CredentialRoleEnv, Env: roleEnvPrefix(roleName) + "API_KEY"}
 			return role
@@ -790,7 +802,7 @@ func rebindCredential(roleName string, role ResolvedRole, crossedProvider bool) 
 			return role
 		}
 		if role.APIKey == "" || role.Credential.Kind == CredentialProviderEnv {
-			role.APIKey, role.Credential = ambientCredential("codex", role.BaseURL)
+			role.APIKey, role.Credential = ambientCredential(role.Protocol, role.BaseURL)
 		}
 		return role
 	}
@@ -950,9 +962,9 @@ func ValidateRole(name string, role ResolvedRole) error {
 	if strings.TrimSpace(role.Model) == "" {
 		return fmt.Errorf("%s model is not configured (set inference_profiles.%s.model or ROAST_%s_MODEL)", name, role.Profile, strings.ToUpper(name))
 	}
-	if role.Protocol == "codex" {
+	if managedLogin(role.Protocol) {
 		if role.APIKey != "" || role.ExplicitEndpoint || role.SessionHeader != "" || role.Credential.Kind == CredentialProfileEnv || role.Credential.Kind == CredentialProfileKey || role.Credential.Kind == CredentialRoleEnv {
-			return fmt.Errorf("%s: codex does not accept endpoints, API keys, or session headers", name)
+			return fmt.Errorf("%s: %s does not accept endpoints, API keys, or session headers", name, role.Protocol)
 		}
 		return validateEndpoint(name, role.BaseURL, role.Protocol, role.MaxOutputTokens)
 	}
@@ -970,7 +982,12 @@ func ValidateRole(name string, role ResolvedRole) error {
 	return validateEndpoint(name, role.BaseURL, role.Protocol, role.MaxOutputTokens)
 }
 
+func managedLogin(protocol string) bool { return protocol == "codex" || protocol == "chatgpt" }
+
 func validateEndpoint(name, baseURL, protocol string, maxOutputTokens int) error {
+	if protocol == "chatgpt" && baseURL != defaultOpenAIBaseURL {
+		return fmt.Errorf("%s: chatgpt requires the fixed public https://api.openai.com/v1 endpoint", name)
+	}
 	if protocol == "codex" {
 		if baseURL != "codex://chatgpt" {
 			return fmt.Errorf("%s: codex endpoint must be the CLI-managed codex://chatgpt sentinel", name)
@@ -985,9 +1002,9 @@ func validateEndpoint(name, baseURL, protocol string, maxOutputTokens int) error
 		return fmt.Errorf("%s endpoint must be an http(s) URL without credentials, a query, or a fragment", name)
 	}
 	switch protocol {
-	case "chat", "responses", "anthropic":
+	case "chat", "responses", "anthropic", "chatgpt":
 	default:
-		return fmt.Errorf("%s protocol must be chat, responses, anthropic, or codex", name)
+		return fmt.Errorf("%s protocol must be chat, responses, anthropic, codex, or chatgpt", name)
 	}
 	if maxOutputTokens <= 0 {
 		return fmt.Errorf("%s max_output_tokens must be positive", name)

@@ -12,6 +12,47 @@ does not load repository-local configuration. A checked-out repository therefore
 cannot select a network destination or credential merely by adding a config
 file.
 
+## Direct ChatGPT plan usage
+
+The opt-in `chatgpt` protocol is a direct Responses provider, separate from the
+`codex` CLI adapter. It addresses the architectural concerns described in
+[upstream issue 127](https://github.com/bluesky-social/roast/issues/127#issuecomment-6693962921):
+Roast retains its own agent loop, scoped read-only exploration tools, final
+submission schema validation, and raw provider-response records. It does not
+launch Codex or delegate the review to a general-purpose CLI harness.
+
+Roast sends its prompts as native developer/user messages and exposes only its
+local function tools in the `roast` namespace. It preserves finalized raw
+assistant output, including encrypted reasoning, in conversation replay. Tools
+remain buffered until a valid `response.completed` and successful raw SSE
+capture. Failed/incomplete/interrupted streams, other tool namespaces, and
+unsupported output types stop the turn without dispatching buffered tools.
+The existing snapshot/path boundary is unchanged: when Git tree pinning fails,
+Roast's existing warned fallback reads the live tree under path guards. This
+backend does not promise a captured snapshot in that fallback case.
+
+The OAuth access token is sent only to the fixed public OpenAI model-list and
+Responses endpoints. Requests use `store: false`, `stream: true`, and full input
+history. Endpoint overrides, API-key overrides, ambient credential headers,
+redirects, and automatic alternative billing are not allowed. Ordinary OpenAI
+service policies and account/workspace restrictions still apply.
+
+Explicit `roast chatgpt signin` creates a separate public-client OAuth grant.
+PKCE, state, nonce, ID-token signature/identity checks, and granted scopes protect
+registration. Roast owns these credentials under its private config directory;
+it never reads Codex credentials. Atomic owner-only files, OS-released locks,
+and protected pending refresh responses handle rotation and interruption.
+Returning sign-in does not force consent unless the user requests `--enable-plan`.
+Direct auth currently rejects Windows before credential access because native
+ACL protection is not implemented. VM credential transfer is manual and must
+preserve the target host identity; see the README and official VM guide.
+
+The preview rejects `max_output_tokens`: output estimates and shared token
+budgets are soft, while request deadlines still apply. A saved grant and mocked
+tests do not prove a particular account/model is eligible. Run the separately
+authorized two-turn `roast doctor` or opt-in live test to verify it. The retained
+`codex` fallback below does not gain these direct-provider properties.
+
 ## Codex CLI and ChatGPT login
 
 The opt-in `codex` protocol sends review prompts and selected repository

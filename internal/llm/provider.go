@@ -69,6 +69,9 @@ func New(ctx context.Context, cfg ClientConfig) (Client, error) {
 	if cfg.MaxOutputTokens <= 0 {
 		return nil, fmt.Errorf("%s: max output tokens must be positive", cfg.Model)
 	}
+	if cfg.Protocol == "chatgpt" {
+		return newChatGPTClient(ctx, cfg)
+	}
 	if cfg.Protocol == "codex" {
 		return newCodexClient(ctx, cfg)
 	}
@@ -142,6 +145,9 @@ func (c *client) addUsage(providerUsage fantasy.Usage) Usage {
 	uncached := input
 	// OpenAI-shaped protocols report cached input as a subset of input_tokens;
 	// Anthropic reports input, cache-read, and cache-creation as disjoint counts.
+	// chatgpt deliberately stays out of this branch: the pinned Fantasy
+	// Responses adapter already subtracts cached input in responsesUsage.
+	// Its end-to-end wire test guards against subtracting that cache twice.
 	if c.cfg.Protocol == "" || c.cfg.Protocol == "chat" || c.cfg.Protocol == "responses" || c.cfg.Protocol == "codex" {
 		cacheRead = min(cacheRead, input)
 		cacheWrite = min(cacheWrite, input-cacheRead)
@@ -186,7 +192,12 @@ type sessionContextKey struct{}
 // reading at a terminal SSE event rather than EOF. Never share bodies between
 // concurrent verifier calls.
 type responseBodyKey struct{}
-type responseBody struct{ body io.ReadCloser }
+type responseBody struct {
+	body io.ReadCloser
+	// A direct plan-usage request retains its precise failure independently
+	// of SDK error mapping. Each attempt owns this state.
+	failure error
+}
 
 func (b *responseBody) close() error {
 	if b.body == nil {

@@ -275,6 +275,7 @@ func newRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	root.AddCommand(newConfigCommand(stdout, stderr))
 	root.AddCommand(newSkillCommand(stdout))
 	root.AddCommand(newDoctorCommand(stdout))
+	root.AddCommand(newChatGPTCommand(stdout))
 	return root
 }
 
@@ -396,7 +397,7 @@ func addRoleFlags(fl interface {
 }, name string, role *roleFlags) {
 	fl.StringVar(&role.baseURL, name+"-base-url", "", name+" inference API base URL")
 	fl.StringVar(&role.model, name+"-model", "", name+" model name")
-	fl.StringVar(&role.protocol, name+"-protocol", "", name+" protocol: chat|responses|anthropic|codex")
+	fl.StringVar(&role.protocol, name+"-protocol", "", name+" protocol: chat|responses|anthropic|codex|chatgpt")
 	fl.IntVar(&role.maxOutputTokens, name+"-max-output-tokens", 0, name+" output-token ceiling")
 }
 
