@@ -52,15 +52,8 @@ func (c *Client) signIn(ctx context.Context, clientID string, consent bool, show
 				return errors.New("ChatGPT registration has no validated identity")
 			}
 		}
-		if i.HostID == "" {
-			r, e := randomValue()
-			if e != nil {
-				return e
-			}
-			i.HostID = "roast-" + r
-			if e = c.saveIndex(i); e != nil {
-				return e
-			}
+		if e = c.ensureHost(&i); e != nil {
+			return e
 		}
 		listener, e := net.Listen("tcp4", "127.0.0.1:0")
 		if e != nil {
