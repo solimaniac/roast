@@ -54,10 +54,13 @@ func CheckCodexLogin(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return errors.New("codex ChatGPT login is unavailable; install the official Codex CLI and run `codex login` yourself")
+		if strings.Contains(output.String(), "Not logged in") {
+			return fmt.Errorf("%w: codex is not logged in; run `codex login` yourself", ErrAuth)
+		}
+		return errors.New("codex ChatGPT login status is unavailable; check the official Codex CLI installation")
 	}
 	if !strings.Contains(output.String(), "Logged in using ChatGPT") {
-		return errors.New("codex requires a ChatGPT subscription login; check `codex login status` (API-key login is not supported by this protocol)")
+		return fmt.Errorf("%w: codex requires a ChatGPT subscription login; check `codex login status` (API-key login is not supported by this protocol)", ErrAuth)
 	}
 	return nil
 }
