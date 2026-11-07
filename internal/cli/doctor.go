@@ -115,7 +115,16 @@ func doctorChecks(ctx context.Context, configPath string) []doctorResult {
 			role = flip.Role
 		}
 		credential := doctorResult{name + "-credential", doctorPass, role.Credential.String()}
-		if strings.TrimSpace(role.APIKey) == "" {
+		if role.Protocol == "codex" {
+			loginContext, cancel := context.WithTimeout(ctx, 15*time.Second)
+			err := llm.CheckCodexLogin(loginContext)
+			cancel()
+			if err != nil {
+				credential.Status, credential.Detail = doctorFail, err.Error()
+			} else {
+				credential.Detail = "Codex CLI reports ChatGPT login"
+			}
+		} else if strings.TrimSpace(role.APIKey) == "" {
 			credential.Status = doctorFail
 		}
 		results = append(results, credential)
@@ -128,6 +137,9 @@ func doctorChecks(ctx context.Context, configPath string) []doctorResult {
 			detail += ", session header " + role.SessionHeader
 		}
 		results = append(results, doctorResult{Name: name + "-profile", Status: doctorPass, Detail: detail})
+		if credential.Status == doctorFail {
+			continue
+		}
 		results = append(results, doctorEndpointCheck(ctx, client, name, role))
 		results = append(results, doctorRoundtripCheck(ctx, name, role))
 	}
@@ -147,13 +159,17 @@ func doctorRoundtripCheck(ctx context.Context, name string, role config.Resolved
 	if maxOutputTokens <= 0 || maxOutputTokens > 512 {
 		maxOutputTokens = 512
 	}
-	// Two requests of at most 15 seconds each, plus setup.
-	probeContext, cancel := context.WithTimeout(ctx, 35*time.Second)
+	// Allow Codex CLI startup and ChatGPT generation time for both turns.
+	requestTimeout, probeTimeout := 15*time.Second, 35*time.Second
+	if role.Protocol == "codex" {
+		requestTimeout, probeTimeout = 120*time.Second, 250*time.Second
+	}
+	probeContext, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 	client, err := llm.New(probeContext, llm.ClientConfig{
 		Role: name, BaseURL: role.BaseURL, APIKey: role.APIKey, Model: role.Model,
 		Protocol: role.Protocol, MaxOutputTokens: maxOutputTokens, SessionHeader: role.SessionHeader,
-		MaxAttempts: 1, RequestTimeout: 15 * time.Second,
+		MaxAttempts: 1, RequestTimeout: requestTimeout,
 	})
 	if err != nil {
 		return doctorResult{name + "-roundtrip", doctorFail, err.Error()}
@@ -214,6 +230,9 @@ func doctorBuildCheck() doctorResult {
 }
 
 func doctorEndpointCheck(ctx context.Context, client *http.Client, name string, role config.ResolvedRole) doctorResult {
+	if role.Protocol == "codex" {
+		return doctorResult{name + "-endpoint", doctorPass, "codex://chatgpt (CLI-managed service; no HTTP model listing)"}
+	}
 	endpoint := strings.TrimRight(role.BaseURL, "/") + "/models"
 	if _, err := url.ParseRequestURI(endpoint); err != nil {
 		return doctorResult{name + "-endpoint", doctorFail, "invalid models endpoint: " + err.Error()}

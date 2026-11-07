@@ -69,6 +69,9 @@ func New(ctx context.Context, cfg ClientConfig) (Client, error) {
 	if cfg.MaxOutputTokens <= 0 {
 		return nil, fmt.Errorf("%s: max output tokens must be positive", cfg.Model)
 	}
+	if cfg.Protocol == "codex" {
+		return newCodexClient(ctx, cfg)
+	}
 	if strings.TrimSpace(cfg.APIKey) == "" {
 		// Fantasy omits an empty key, and the SDKs then fall back to ambient
 		// credentials: environment variables, profile files, or federation.
@@ -139,7 +142,7 @@ func (c *client) addUsage(providerUsage fantasy.Usage) Usage {
 	uncached := input
 	// OpenAI-shaped protocols report cached input as a subset of input_tokens;
 	// Anthropic reports input, cache-read, and cache-creation as disjoint counts.
-	if c.cfg.Protocol == "" || c.cfg.Protocol == "chat" || c.cfg.Protocol == "responses" {
+	if c.cfg.Protocol == "" || c.cfg.Protocol == "chat" || c.cfg.Protocol == "responses" || c.cfg.Protocol == "codex" {
 		cacheRead = min(cacheRead, input)
 		cacheWrite = min(cacheWrite, input-cacheRead)
 		uncached = input - cacheRead - cacheWrite
