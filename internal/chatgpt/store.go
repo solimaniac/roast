@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -33,6 +34,7 @@ type pendingRefresh struct {
 type credential struct {
 	Pending *pendingRefresh `json:"pending_refresh,omitempty"`
 	Account
+	Generation        string `json:"generation,omitempty"`
 	IDToken           string `json:"id_token,omitempty"`
 	AccessToken       string `json:"access_token,omitempty"`
 	RefreshToken      string `json:"refresh_token,omitempty"`
@@ -40,9 +42,10 @@ type credential struct {
 	EarliestRefreshAt int64  `json:"earliest_refresh_at,omitempty"`
 }
 type index struct {
-	HostID  string   `json:"host_id"`
-	Active  string   `json:"active"`
-	Clients []string `json:"clients"`
+	HostID           string   `json:"host_id"`
+	Active           string   `json:"active"`
+	Clients          []string `json:"clients"`
+	SelectionVersion uint64   `json:"selection_version,omitempty"`
 }
 
 func randomValue() (string, error) {
@@ -52,6 +55,24 @@ func randomValue() (string, error) {
 	}
 	return hex.EncodeToString(b), nil
 }
+
+// setActive assigns a fresh equality token on every selection write. An older
+// writer can erase the revision, so deterministic increments could recreate a
+// snapshot still held by a pending authorization. Call under the session lock.
+func (i *index) setActive(id string) error {
+	var b [8]byte
+	for {
+		if _, err := rand.Read(b[:]); err != nil {
+			return err
+		}
+		if v := binary.BigEndian.Uint64(b[:]); v != 0 && v != i.SelectionVersion {
+			i.Active = id
+			i.SelectionVersion = v
+			return nil
+		}
+	}
+}
+
 func (c *Client) path(id string) string {
 	h := sha256.Sum256([]byte(id))
 	return filepath.Join(c.dir, hex.EncodeToString(h[:])+".json")
@@ -118,12 +139,28 @@ func writeJSON(path string, v any) error {
 	return dir.Sync()
 }
 func (c *Client) locked(ctx context.Context, fn func() error) error {
+	return c.lockedFile(ctx, "session", fn)
+}
+
+// Authorization waits never own the session lock. Separate registration locks
+// prevent overlapping OAuth flows from consuming or replacing each other's
+// credentials, while other accounts can sign in and use the store normally.
+func (c *Client) authorizationLocked(ctx context.Context, id string, fn func() error) error {
+	name := "authorization-new"
+	if id != "" {
+		h := sha256.Sum256([]byte(id))
+		name = "authorization-" + hex.EncodeToString(h[:])
+	}
+	return c.lockedFile(ctx, name, fn)
+}
+
+func (c *Client) lockedFile(ctx context.Context, name string, fn func() error) error {
 	if err := secureDir(c.dir); err != nil {
 		return err
 	}
 	// Kernel-owned advisory locks are released even if Roast is killed. Never
 	// unlink this file: doing so would allow separate processes to lock two inodes.
-	lock := filepath.Join(c.dir, "session.lock")
+	lock := filepath.Join(c.dir, name+".lock")
 	if st, err := os.Lstat(lock); err == nil && (!st.Mode().IsRegular() || st.Mode().Perm()&0077 != 0) {
 		return errors.New("ChatGPT lock must be a private regular file")
 	}
@@ -135,6 +172,9 @@ func (c *Client) locked(ctx context.Context, fn func() error) error {
 	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	for {
+		if err := waitCtx.Err(); err != nil {
+			return fmt.Errorf("waiting for ChatGPT lock: %w", err)
+		}
 		ok, err := tryLock(f)
 		if err != nil {
 			return err
@@ -144,7 +184,7 @@ func (c *Client) locked(ctx context.Context, fn func() error) error {
 		}
 		select {
 		case <-waitCtx.Done():
-			return fmt.Errorf("waiting for ChatGPT session lock: %w", waitCtx.Err())
+			return fmt.Errorf("waiting for ChatGPT lock: %w", waitCtx.Err())
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
@@ -168,7 +208,16 @@ func (c *Client) load(id string) (credential, error) {
 	}
 	return v, err
 }
-func (c *Client) save(v credential) error { return writeJSON(c.path(v.ClientID), v) }
+func (c *Client) save(v credential) error {
+	// Every write, including a repeated sign-out, invalidates an OAuth snapshot.
+	// A fresh opaque generation also works with records written by older Roast.
+	generation, err := randomValue()
+	if err != nil {
+		return err
+	}
+	v.Generation = generation
+	return writeJSON(c.path(v.ClientID), v)
+}
 func (c *Client) Status(ctx context.Context) ([]Account, error) {
 	if _, err := os.Lstat(c.dir); errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -207,7 +256,9 @@ func (c *Client) Select(ctx context.Context, id string) error {
 		if v.AccessToken == "" && v.IDToken == "" {
 			return errors.New("account is signed out; run roast chatgpt signin --account CLIENT_ID")
 		}
-		i.Active = id
+		if e = i.setActive(id); e != nil {
+			return e
+		}
 		return c.saveIndex(i)
 	})
 }

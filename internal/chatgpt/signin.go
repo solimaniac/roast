@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -91,23 +92,48 @@ func (c *Client) EnablePlan(ctx context.Context, clientID string, showURL func(s
 func (c *Client) signIn(ctx context.Context, clientID string, consent bool, showURL func(string) error) error {
 	ctx, cancel := signInContext(ctx)
 	defer cancel()
-	return c.locked(ctx, func() error {
-		i, e := c.loadIndex()
-		if e != nil {
-			return e
-		}
+	return c.authorizationLocked(ctx, clientID, func() error {
+		var i index
 		var old credential
-		if clientID != "" {
-			old, e = c.load(clientID)
+		if err := c.locked(ctx, func() error {
+			var e error
+			i, e = c.loadIndex()
 			if e != nil {
 				return e
 			}
-			if old.Subject == "" && !old.PendingRegistration {
-				return errors.New("ChatGPT registration has no validated identity")
+			if clientID != "" {
+				old, e = c.load(clientID)
+				if e != nil {
+					return e
+				}
+				if old.Subject == "" && !old.PendingRegistration {
+					return errors.New("ChatGPT registration has no validated identity")
+				}
 			}
-		}
-		if e = c.ensureHost(&i); e != nil {
+			if e = c.ensureHost(&i); e != nil {
+				return e
+			}
+			// An older writer drops this field, so even reselecting the same active
+			// account remains detectable while this authorization is pending.
+			if i.SelectionVersion == 0 {
+				if e = i.setActive(i.Active); e != nil {
+					return e
+				}
+				if e = c.saveIndex(i); e != nil {
+					return e
+				}
+			}
+			// Upgrade legacy snapshots before releasing the lock. An older binary
+			// drops this field when writing, even on an otherwise idempotent sign-out.
+			if clientID != "" && old.Generation == "" {
+				if e = c.save(old); e != nil {
+					return e
+				}
+				old, e = c.load(clientID)
+			}
 			return e
+		}); err != nil {
+			return err
 		}
 		listener, e := net.Listen("tcp4", "127.0.0.1:0")
 		if e != nil {
@@ -222,57 +248,113 @@ func (c *Client) signIn(ctx context.Context, clientID string, consent bool, show
 			c.signInEvent("callback_failed")
 			return cb.err
 		}
-		if clientID == "" {
-			// The callback identifies a newly issued client, not an authenticated user.
-			// Persist only that pending mapping before exchanging its one-use code so
-			// invalid_grant or a later validation failure can resume the same client.
-			if slices.Contains(i.Clients, cb.id) {
-				return errors.New("ChatGPT registration already exists; reauthorize using --account")
-			}
-			if _, loadErr := c.load(cb.id); !errors.Is(loadErr, os.ErrNotExist) {
-				return errors.New("ChatGPT registration record already exists or is unreadable; reauthorize using --account")
-			}
-			pending := credential{Account: Account{ClientID: cb.id, PendingRegistration: true}}
-			if e = c.save(pending); e != nil {
+		finish := func() error {
+			// Recheck under the store lock before consuming a one-use code. A browser
+			// wait must not undo a sign-out or overwrite a token refreshed meanwhile.
+			if e = c.locked(ctx, func() error {
+				current, err := c.loadIndex()
+				if err != nil {
+					return err
+				}
+				if current.HostID != i.HostID {
+					return errors.New("ChatGPT host identity changed during sign-in")
+				}
+				if clientID != "" {
+					return c.checkSignInSnapshot(old)
+				}
+				// The callback identifies a newly issued client, not an authenticated
+				// user. Retain a pending mapping so failed exchanges can be retried.
+				if slices.Contains(current.Clients, cb.id) {
+					return errors.New("ChatGPT registration already exists; reauthorize using --account")
+				}
+				if _, loadErr := c.load(cb.id); !errors.Is(loadErr, os.ErrNotExist) {
+					return errors.New("ChatGPT registration record already exists or is unreadable; reauthorize using --account")
+				}
+				pending := credential{Account: Account{ClientID: cb.id, PendingRegistration: true}}
+				if err = c.save(pending); err != nil {
+					return err
+				}
+				old, err = c.load(cb.id)
+				if err != nil {
+					return err
+				}
+				current.Clients = append(current.Clients, cb.id)
+				return c.saveIndex(current)
+			}); e != nil {
 				return e
 			}
-			i.Clients = append(i.Clients, cb.id)
-			if e = c.saveIndex(i); e != nil {
-				return e
+			var t tokenResponse
+			c.signInEvent("exchange_started")
+			if e = c.request(ctx, http.MethodPost, tokenURL, url.Values{"grant_type": {"authorization_code"}, "client_id": {cb.id}, "code": {cb.code}, "code_verifier": {verifier}, "redirect_uri": {redirect}, "resource": {APIBaseURL}}, "", &t); e != nil {
+				return fmt.Errorf("%w; retry sign-in with roast chatgpt signin --account %s", e, cb.id)
 			}
-		}
-		var t tokenResponse
-		c.signInEvent("exchange_started")
-		if e = c.request(ctx, http.MethodPost, tokenURL, url.Values{"grant_type": {"authorization_code"}, "client_id": {cb.id}, "code": {cb.code}, "code_verifier": {verifier}, "redirect_uri": {redirect}, "resource": {APIBaseURL}}, "", &t); e != nil {
-			return fmt.Errorf("%w; retry sign-in with roast chatgpt signin --account %s", e, cb.id)
-		}
-		identity, e := c.validateID(ctx, t.IDToken, cb.id, nonce)
-		if e != nil {
-			return fmt.Errorf("%w; retry sign-in with roast chatgpt signin --account %s", e, cb.id)
-		}
-		if clientID != "" && old.Subject != "" && identity.Subject != old.Subject {
-			return errors.New("ChatGPT account identity changed during reauthorization")
-		}
+			receivedAt := c.now()
+			identity, e := c.validateID(ctx, t.IDToken, cb.id, nonce)
+			if e != nil {
+				return fmt.Errorf("%w; retry sign-in with roast chatgpt signin --account %s", e, cb.id)
+			}
+			if clientID != "" && old.Subject != "" && identity.Subject != old.Subject {
+				return errors.New("ChatGPT account identity changed during reauthorization")
+			}
 
-		v := credential{Account: Account{ClientID: cb.id, Subject: identity.Subject, Email: identity.Email}}
-		if e = c.apply(&v, t); e != nil {
-			return e
+			v := credential{Account: Account{ClientID: cb.id, Subject: identity.Subject, Email: identity.Email}}
+			if e = c.apply(&v, t); e != nil {
+				return e
+			}
+			// JWKS validation must not extend the token's actual usable lifetime.
+			v.ExpiresAt = receivedAt.Add(time.Duration(t.ExpiresIn) * time.Second)
+			if e = c.locked(ctx, func() error {
+				current, err := c.loadIndex()
+				if err != nil {
+					return err
+				}
+				if current.HostID != i.HostID {
+					return errors.New("ChatGPT host identity changed during sign-in")
+				}
+				if err = c.checkSignInSnapshot(old); err != nil {
+					return err
+				}
+				if err = c.save(v); err != nil {
+					return err
+				}
+				if !slices.Contains(current.Clients, cb.id) {
+					current.Clients = append(current.Clients, cb.id)
+				}
+				// A newer explicit selection (even reselecting the same account),
+				// sign-out, or completed sign-in wins over this browser flow.
+				if current.SelectionVersion == i.SelectionVersion && current.Active == i.Active {
+					if err = current.setActive(cb.id); err != nil {
+						return err
+					}
+				}
+				return c.saveIndex(current)
+			}); e != nil {
+				return e
+			}
+			if !hasScope(v.Scopes, "chatgpt.tokens.use.direct") || !hasScope(v.Scopes, "resource.invoke") {
+				return fmt.Errorf("signed in, but ChatGPT plan usage is disabled; enable with roast chatgpt signin --account %s --enable-plan, or configure another billing path", cb.id)
+			}
+			return nil
 		}
-		if e = c.save(v); e != nil {
-			return e
+		if clientID == "" {
+			// A new registration has no ID until the callback. Lock that ID too
+			// before publishing its pending record for an explicit retry.
+			return c.authorizationLocked(ctx, cb.id, finish)
 		}
-		if !slices.Contains(i.Clients, cb.id) {
-			i.Clients = append(i.Clients, cb.id)
-		}
-		i.Active = cb.id
-		if e = c.saveIndex(i); e != nil {
-			return e
-		}
-		if !hasScope(v.Scopes, "chatgpt.tokens.use.direct") || !hasScope(v.Scopes, "resource.invoke") {
-			return fmt.Errorf("signed in, but ChatGPT plan usage is disabled; enable with roast chatgpt signin --account %s --enable-plan, or configure another billing path", cb.id)
-		}
-		return nil
+		return finish()
 	})
+}
+
+// checkSignInSnapshot runs under the session lock at both exchange and commit.
+func (c *Client) checkSignInSnapshot(old credential) error {
+	current, err := c.load(old.ClientID)
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(current, old) {
+		return errors.New("ChatGPT credentials changed during sign-in; retry sign-in explicitly")
+	}
+	return nil
 }
 
 // Issued client IDs are opaque. The documented example prefix is not a format

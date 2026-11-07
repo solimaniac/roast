@@ -319,7 +319,9 @@ func (c *Client) SignOut(ctx context.Context, id string) error {
 			return e
 		}
 		if i.Active == id {
-			i.Active = ""
+			if e = i.setActive(""); e != nil {
+				return e
+			}
 			if e = c.saveIndex(i); e != nil {
 				return e
 			}
