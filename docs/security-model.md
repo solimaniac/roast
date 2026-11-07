@@ -41,6 +41,32 @@ ambient OpenAI API credentials and base URLs are ignored. Set up login with
 For this protocol `max_output_tokens` is only an admission estimate: the CLI
 cannot enforce Roast's output-token ceiling, and token budgets are soft limits.
 
+### The CLI remains a separate agent harness
+
+The adapter does not call the raw model directly. It serializes Roast's original
+message roles, history, and tool schemas into one CLI user prompt. A serialized
+`system` label is data, not a native API system instruction. Codex's own
+system/developer instructions, policy machinery, model-specific tools, and
+centrally managed settings remain in effect and may change with CLI versions.
+This changes the instruction hierarchy and adds a trust boundary compared with
+Roast's direct HTTP providers.
+
+Disabled feature flags and read-only sandboxing reduce capability but do not
+remove all native tool definitions. For example, Codex can expose `apply_patch`
+while the sandbox denies writes, and model-specific utility tools can remain.
+Rejecting an unexpected/native item prevents subsequent Roast tool dispatch;
+it cannot undo or prove the absence of an action the CLI already attempted.
+Do not treat the adapter's post-execution event checks as a pre-execution tool
+allowlist or a replacement for the CLI's sandbox.
+
+For `protocol: codex`, durable response capture is synthesized from the final
+structured envelope and CLI-reported usage. It omits original provider SSE,
+internal prompts, and internal agent steps. A usage `calls` count is a count of
+CLI invocations, not a count of underlying model requests. Consequently this
+backend preserves Roast's outer review/verification workflow but does not claim
+identical adversarial isolation, instruction priority, accounting, or audit
+replay guarantees to a direct-model provider.
+
 ## Configuration templates
 
 An organization can publish a configuration template at a URL. A template is
