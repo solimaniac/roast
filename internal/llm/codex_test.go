@@ -202,7 +202,7 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input
 
 func TestCodexRejectsAPIKeyLogin(t *testing.T) {
 	fakeCodex(t, "echo 'Logged in using an API key'; exit 0\n")
-	if err := CheckCodexLogin(t.Context()); err == nil || !strings.Contains(err.Error(), "API-key login") {
+	if err := CheckCodexLogin(t.Context()); !errors.Is(err, ErrAuth) || !strings.Contains(err.Error(), "API-key login") {
 		t.Fatalf("error=%v", err)
 	}
 }
@@ -223,6 +223,20 @@ func TestCodexDiagnosticsDoNotExposeStderr(t *testing.T) {
 	m := &codexModel{cfg: ClientConfig{Model: "test"}}
 	_, err := m.runCLI(t.Context(), []byte("prompt"), []byte(`{}`))
 	if err == nil || !strings.Contains(err.Error(), "read-only runtime home") || strings.Contains(err.Error(), "secret-value") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestCodexMissingLoginIsAuthenticationError(t *testing.T) {
+	fakeCodex(t, "echo 'Not logged in' >&2; exit 1\n")
+	if err := CheckCodexLogin(t.Context()); !errors.Is(err, ErrAuth) {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestCodexMissingExecutableIsNotAuthenticationError(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	if err := CheckCodexLogin(t.Context()); err == nil || errors.Is(err, ErrAuth) {
 		t.Fatalf("error=%v", err)
 	}
 }
