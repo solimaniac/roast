@@ -253,3 +253,36 @@ func TestCodexLoginTimeoutBoundsLauncherPipes(t *testing.T) {
 		t.Fatalf("login check waited for a descendant's pipe: %v", elapsed)
 	}
 }
+
+func TestCodexInferenceAuthenticationDiagnostics(t *testing.T) {
+	for _, message := range []string{"401 Unauthorized", "403 Forbidden", "refresh_token_reused", "refresh_token_expired", "refresh_token_invalidated"} {
+		err := codexCLIError(errors.New("exit"), "private-detail "+message)
+		if !errors.Is(err, ErrAuth) || strings.Contains(err.Error(), "private-detail") {
+			t.Fatalf("message=%q error=%v", message, err)
+		}
+	}
+	if err := codexCLIError(errors.New("exit"), "429 Too Many Requests"); errors.Is(err, ErrAuth) {
+		t.Fatalf("quota error misclassified: %v", err)
+	}
+	for _, data := range [][]byte{
+		[]byte(`{"type":"error","message":"401 Unauthorized private-detail"}`),
+		[]byte(`{"type":"turn.failed","error":{"message":"refresh_token_expired private-detail"}}`),
+	} {
+		_, _, err := parseCodexEvents(data, map[string]bool{"read": true})
+		if !errors.Is(err, ErrAuth) || strings.Contains(err.Error(), "private-detail") || !codexEventsReportAuthFailure(data) {
+			t.Fatalf("error=%v", err)
+		}
+	}
+	if codexEventsReportAuthFailure(codexEvents("submit", `{"answer":"401 Unauthorized"}`)) {
+		t.Fatal("generated content treated as an authentication diagnostic")
+	}
+}
+
+func TestCodexSubprocessAuthErrorFromJSON(t *testing.T) {
+	fakeCodex(t, "printf '%s\\n' '{\"type\":\"turn.failed\",\"error\":{\"message\":\"401 Unauthorized private-detail\"}}'; exit 1\n")
+	m := &codexModel{cfg: ClientConfig{Model: "test"}}
+	_, err := m.runCLI(t.Context(), []byte("prompt"), []byte(`{}`))
+	if !errors.Is(err, ErrAuth) || strings.Contains(err.Error(), "private-detail") {
+		t.Fatalf("error=%v", err)
+	}
+}

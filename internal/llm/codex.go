@@ -188,6 +188,9 @@ func (m *codexModel) runCLI(ctx context.Context, prompt, schema []byte) ([]byte,
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		if codexEventsReportAuthFailure(output.Bytes()) {
+			return nil, codexAuthenticationError()
+		}
 		return nil, codexCLIError(err, stderr.String())
 	}
 	return output.Bytes(), nil
@@ -195,6 +198,9 @@ func (m *codexModel) runCLI(ctx context.Context, prompt, schema []byte) ([]byte,
 
 // Classify fixed diagnostic phrases without exposing arbitrary CLI output.
 func codexCLIError(err error, stderr string) error {
+	if codexAuthDiagnostic(stderr) {
+		return codexInferenceFailure(stderr)
+	}
 	if strings.Contains(stderr, "Read-only file system") {
 		return errors.New("codex cannot initialize in its read-only runtime home; use an existing writable Codex installation or sign in with the official CLI in a writable CODEX_HOME (do not copy login tokens)")
 	}
@@ -206,6 +212,48 @@ func codexCLIError(err error, stderr string) error {
 		return fmt.Errorf("codex exec exited with status %d; check ChatGPT login, subscription limits, and model access", exit.ExitCode())
 	}
 	return errors.New("codex exec could not run; check that the official Codex CLI is installed and on PATH")
+}
+
+func codexAuthDiagnostic(message string) bool {
+	message = strings.ToLower(message)
+	for _, marker := range []string{"401 unauthorized", "403 forbidden", "refresh_token_reused", "refresh_token_expired", "refresh_token_invalidated", "refresh token has expired", "refresh token has already been used", "refresh token has been revoked", "not logged in"} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func codexAuthenticationError() error {
+	return fmt.Errorf("%w: codex ChatGPT authentication failed; sign in again with the official CLI", ErrAuth)
+}
+
+func codexInferenceFailure(message string) error {
+	if codexAuthDiagnostic(message) {
+		return codexAuthenticationError()
+	}
+	return errors.New("codex inference failed; check subscription limits and model access")
+}
+
+type codexFailureEvent struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
+	Error   struct {
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// Inspect only error-event diagnostics, never generated messages/tool content.
+func codexEventsReportAuthFailure(data []byte) bool {
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 4096), maxCapturedResponseSize)
+	for scanner.Scan() {
+		var event codexFailureEvent
+		if json.Unmarshal(scanner.Bytes(), &event) == nil && (event.Type == "error" || event.Type == "turn.failed") && codexAuthDiagnostic(event.Message+" "+event.Error.Message) {
+			return true
+		}
+	}
+	return false
 }
 
 func codexArgs(model, dir, schema string) []string {
@@ -278,7 +326,9 @@ func parseCodexEvents(data []byte, names map[string]bool) (codexToolCall, fantas
 		}
 		switch event.Type {
 		case "turn.failed", "error":
-			return result, usage, errors.New("codex inference failed; check subscription limits and model access")
+			var failure codexFailureEvent
+			_ = json.Unmarshal(scanner.Bytes(), &failure)
+			return result, usage, codexInferenceFailure(failure.Message + " " + failure.Error.Message)
 		case "item.started", "item.updated", "item.completed":
 			switch event.Item.Type {
 			case "agent_message":
