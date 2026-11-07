@@ -146,6 +146,10 @@ unsupported versions.
 
 ### Codex with a ChatGPT login
 
+This backend is specific to this fork; upstream Roast releases do not include
+it. From this fork's checkout, build with Go 1.27.3 or newer using
+`go build -o roast ./cmd/roast`, then use that binary (for example `./roast`).
+
 Install the official [Codex CLI](https://developers.openai.com/codex/cli/),
 then run `codex login` and choose ChatGPT sign-in. Roast uses the CLI's managed
 login, not an OpenAI API key. Choose a model available to your ChatGPT account:
@@ -170,10 +174,11 @@ Use a recent official CLI with `exec --ignore-user-config`, `--ephemeral`,
 `--json`, and `--output-schema` support. Roast launches each call in a fresh
 private temporary directory with the read-only sandbox. User configuration,
 project instructions, native shell/browser/image tools, plugins, and hooks are
-disabled. Only Roast's existing scoped tools supply review context; native-tool
-output is rejected rather than accepted as a review result. Full conversation
-history is replayed for each call, which can be slower and consume more of your
-subscription allowance than a single interactive Codex session.
+disabled. Roast runs its own scoped tools and rejects results containing
+native-tool events. That check happens after CLI execution, so it is defense
+in depth, not a guarantee that no native tool ran. Full conversation history is
+replayed for each call, which can be slower and consume more of your subscription
+allowance than a single interactive Codex session.
 
 The CLI needs a writable runtime home even with ephemeral sessions. If your
 host's existing Codex installation is read-only, use a separate writable
@@ -194,6 +199,31 @@ expose that per-call cap. Roast's token budget is a soft limit and may be
 exceeded by a call already in flight. Codex CLI/model limits and ChatGPT
 account usage limits still apply. Doctor permits up to 120 seconds per call
 and 250 seconds for each role's two-turn probe.
+
+#### CLI harness limitations
+
+This backend does **not** provide the same model interface or audit evidence as
+Roast's direct API providers. Each Roast conversation, including its system-role
+messages and tool schemas, is serialized inside a Codex **user prompt**. Those
+quoted role labels do not retain native API instruction priority. Codex still
+adds its own system/developer instructions, model-specific tool definitions,
+and agent/policy behavior above that prompt. Ignoring user config does not
+remove this built-in harness or centrally managed configuration.
+
+Roast retains its outer finder/verifier workflow, scoped tool dispatch,
+submission validation, deadlines, and local run records. However, Codex may
+perform internal steps before returning the structured tool selection. Some
+built-in tools can remain exposed, such as `apply_patch` (whose writes the
+read-only sandbox denies) and model-specific utilities. The adapter's native
+item rejection happens after execution, not before it.
+
+Codex response capture stores the final tool envelope and reported usage, not
+the original provider SSE, full harness prompts, or internal execution trace.
+The recorded call count counts CLI invocations rather than underlying model
+requests. Context overhead, latency, usage accounting, and output limits also
+differ. A verified Roast report still means the outer verifier accepted the
+finding, but this backend must not be presented as equivalent to upstream's
+direct-model isolation, instruction hierarchy, or raw-response auditability.
 
 ### Credentials and precedence
 
