@@ -48,6 +48,7 @@ func CheckCodexLogin(ctx context.Context) error {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "codex", "login", "status")
 	cmd.Env = codexEnvironment()
+	cmd.WaitDelay = time.Second
 	var output boundedCodexBuffer
 	cmd.Stdout, cmd.Stderr = &output, &output
 	if err := cmd.Run(); err != nil {
