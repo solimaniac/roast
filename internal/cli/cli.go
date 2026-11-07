@@ -499,6 +499,11 @@ func runReviewCommand(ctx context.Context, changed func(string) bool, f *reviewF
 			return &usageError{msg: err.Error()}
 		}
 	}
+	if finderRole.Protocol == "chatgpt" || (doVerify && verifierRole.Protocol == "chatgpt") {
+		// Capture selection once before any review work. A verifier created
+		// after the finder must use this operation's account, not a later one.
+		ctx = llm.WithChatGPTAccount(ctx)
+	}
 
 	repo, err := scope.GitRoot(".")
 	if err != nil {

@@ -228,6 +228,43 @@ func TestChatGPTAdmissionPreservesErrorAndDoesNotRetryLimit(t *testing.T) {
 	}
 }
 
+func TestChatGPTAuthenticationRecoveryDoesNotSuggestAPIKeys(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		status   int
+		body     string
+		recovery string
+	}{
+		{"unauthorized", http.StatusUnauthorized, `{"detail":"permission missing"}`, "roast chatgpt signin --account CLIENT_ID"},
+		{"forbidden", http.StatusForbidden, `{"detail":"permission missing"}`, "roast chatgpt signin --account CLIENT_ID --enable-plan"},
+		{"ineligible-401", http.StatusUnauthorized, `{"error":{"code":"subscription_sharing_user_not_eligible"}}`, "repeating OAuth will not resolve eligibility"},
+		{"ineligible-403", http.StatusForbidden, `{"error":{"code":"subscription_sharing_user_not_eligible"}}`, "repeating OAuth will not resolve eligibility"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requests := 0
+			c := planTestClient(t, ClientConfig{MaxAttempts: 3}, planRoundTripper(func(*http.Request) (*http.Response, error) {
+				requests++
+				return &http.Response{StatusCode: tc.status, Header: http.Header{"X-Request-Id": {"req_auth"}}, Body: io.NopCloser(strings.NewReader(tc.body))}, nil
+			}))
+			var out struct{ Answer string }
+			err := c.CompleteStructured(t.Context(), "system", "user", "submit", &out)
+			if !errors.Is(err, ErrAuth) || requests != 1 {
+				t.Fatalf("requests=%d error=%v, want one attempt and ErrAuth", requests, err)
+			}
+			var planErr *chatGPTError
+			if !errors.As(err, &planErr) || planErr.StatusCode != tc.status || planErr.RequestID != "req_auth" || planErr.Body != tc.body {
+				t.Fatalf("lost typed ChatGPT error details: %v", err)
+			}
+			if !strings.Contains(err.Error(), tc.recovery) || strings.Contains(err.Error(), "API key") {
+				t.Fatalf("wrong ChatGPT recovery advice: %v", err)
+			}
+			if strings.Contains(tc.name, "ineligible") && strings.Contains(err.Error(), "roast chatgpt signin") {
+				t.Fatalf("eligibility failure suggests repeating OAuth: %v", err)
+			}
+		})
+	}
+}
+
 func TestChatGPTRejectsOverridesAndUnexpectedRoutes(t *testing.T) {
 	for _, cfg := range []ClientConfig{{APIKey: "secret"}, {BaseURL: "https://chatgpt.com/backend-api/codex"}, {SessionHeader: "X-Session"}} {
 		cfg.Protocol, cfg.Model, cfg.MaxOutputTokens = "chatgpt", "test", 100
@@ -241,6 +278,40 @@ func TestChatGPTRejectsOverridesAndUnexpectedRoutes(t *testing.T) {
 		if _, err := transport.RoundTrip(req); err == nil {
 			t.Fatal("accepted wrong endpoint")
 		}
+	}
+}
+
+func TestChatGPTRejectsOversizedRestoredHistoryBeforeCredentials(t *testing.T) {
+	output := &chatGPTOutput{Items: []json.RawMessage{
+		json.RawMessage(`{"type":"reasoning","id":"reason-large","summary":[],"encrypted_content":"` + strings.Repeat("x", defaultInputByteCeiling*4) + `","status":"completed"}`),
+	}}
+	state := &chatGPTCall{prompt: fantasy.Prompt{{
+		Role: fantasy.MessageRoleAssistant,
+		Content: []fantasy.MessagePart{fantasy.TextPart{
+			Text:            "small SDK history",
+			ProviderOptions: fantasy.ProviderOptions{chatGPTOutputKey: output},
+		}},
+	}}}
+	owner := &responseBody{}
+	ctx := context.WithValue(t.Context(), chatGPTCallKey{}, state)
+	ctx = context.WithValue(ctx, responseBodyKey{}, owner)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, chatGPTBaseURL+"/responses", strings.NewReader(`{"input":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &chatGPTTransport{
+		token: func(context.Context) (string, error) {
+			t.Fatal("retrieved credential for oversized restored history")
+			return "", nil
+		},
+		base: planRoundTripper(func(*http.Request) (*http.Response, error) {
+			t.Fatal("sent oversized restored history")
+			return nil, nil
+		}),
+	}
+	resp, err := transport.RoundTrip(req)
+	if resp != nil || err == nil || !strings.Contains(err.Error(), "exceeds the bounded input size") || owner.failure != err {
+		t.Fatalf("response=%v error=%v retained failure=%v", resp, err, owner.failure)
 	}
 }
 

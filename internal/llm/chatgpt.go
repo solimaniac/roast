@@ -25,7 +25,7 @@ func newChatGPTClient(ctx context.Context, cfg ClientConfig) (Client, error) {
 	if err := validateChatGPTConfig(cfg); err != nil {
 		return nil, err
 	}
-	auth, err := chatgpt.New()
+	auth, err := chatGPTAccount(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("%w: initialize Sign in with ChatGPT: %w", ErrAuth, err)
 	}
@@ -109,6 +109,11 @@ func (t *chatGPTTransport) RoundTrip(original *http.Request) (*http.Response, er
 	body, err = chatGPTRequest(body)
 	if err != nil {
 		return nil, fail(err)
+	}
+	// Restoring finalized assistant output can make a small SDK request
+	// exceed the limit. Bound the actual wire body before reading credentials.
+	if len(body) > defaultInputByteCeiling*4 {
+		return nil, fail(errors.New("ChatGPT request exceeds the bounded input size"))
 	}
 	accessToken, err := t.token(original.Context())
 	if err != nil {
@@ -250,6 +255,13 @@ func (e *chatGPTError) Error() string {
 		detail += "; this user, workspace, or policy is not eligible; repeating OAuth will not resolve eligibility"
 	case "subscription_sharing_unsupported_capability":
 		detail += "; remove the unsupported capability rather than retrying the same request"
+	default:
+		switch e.StatusCode {
+		case http.StatusUnauthorized:
+			detail += "; check the selected account with roast chatgpt status and reauthorize it with roast chatgpt signin --account CLIENT_ID"
+		case http.StatusForbidden:
+			detail += "; check ChatGPT plan permission and account/workspace eligibility; if plan permission is missing, request consent with roast chatgpt signin --account CLIENT_ID --enable-plan"
+		}
 	}
 	return detail
 }
