@@ -220,15 +220,8 @@ func (c *Client) PrepareHost(ctx context.Context) (hostID, dir string, err error
 		if e != nil {
 			return e
 		}
-		if i.HostID == "" {
-			r, e := randomValue()
-			if e != nil {
-				return e
-			}
-			i.HostID = "roast-" + r
-			if e = c.saveIndex(i); e != nil {
-				return e
-			}
+		if e = c.ensureHost(&i); e != nil {
+			return e
 		}
 		hostID = i.HostID
 		return nil

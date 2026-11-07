@@ -230,7 +230,10 @@ blocks inference. Only an explicit
 Roast stores credentials separately under the operating-system user config
 directory's `roast/chatgpt/` subdirectory (for example,
 `~/.config/roast/chatgpt/` on Linux). `accounts.json` records the stable host ID,
-selected client ID, and registration list. Each credential filename is the
+selected client ID, and registration list. New hosts use a random UUIDv4 in
+`urn:uuid:` format, reused across sign-ins. Legacy Roast-generated host IDs
+are migrated only when no registration exists; registered host identities are
+never silently replaced. Each credential filename is the
 SHA-256 hex digest of its issued client ID, followed by `.json`. Directory and
 file permissions are owner-only. Atomic writes and kernel-released locks
 serialize rotating-token refreshes across processes. A pending rotated token
