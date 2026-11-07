@@ -286,6 +286,9 @@ func (m *managedModel) streamCall(ctx context.Context, call fantasy.Call, releas
 		if err := m.client.transport.failure(); err != nil {
 			callErr = err
 		}
+		if body.failure != nil {
+			callErr = body.failure
+		}
 	}()
 	m.state.blockExploration, m.state.rejectFinal, m.state.acceptFinal = "", "", nil
 	stream, err := m.client.model.Stream(callCtx, call)
@@ -333,6 +336,12 @@ func (m *managedModel) streamCall(ctx context.Context, call fantasy.Call, releas
 	_ = body.close()
 	if err := m.client.transport.failure(); err != nil {
 		return err
+	}
+	// Some SDKs stop at a terminal SSE event without requesting another body
+	// read. A wire guard can already have rejected that event; never postpone
+	// its failure until deferred cleanup after buffered tools are released.
+	if body.failure != nil {
+		return body.failure
 	}
 	if err := callCtx.Err(); err != nil {
 		return err

@@ -219,3 +219,21 @@ the selected module graph.
 
 Do not report vulnerabilities in a public issue. Follow [SECURITY.md](SECURITY.md)
 instead.
+
+## Direct ChatGPT plan backend checks
+
+The fork's `chatgpt` tests use mocked OAuth/JWKS and local stream fixtures. They
+must not discover credentials or start authorization as part of normal tests.
+The opt-in live test uses only the independent account created by
+`roast chatgpt signin`, sends a fixed diagnostic prompt and random tool token,
+and never sends source files:
+
+```sh
+ROAST_LIVE_CHATGPT=1 ROAST_LIVE_CHATGPT_MODELS=gpt-6.1-sol,gpt-6-astra \
+  go test ./internal/llm -run TestLiveChatGPTTwoTurnReview -count=1 -v
+```
+
+Choose account-available model slugs. This consumes ChatGPT plan usage and has
+request deadlines but no hard generation-token ceiling, as required by the
+preview. Never enable it without the account owner's authorization. Mock tests
+or an existing Codex CLI login are not evidence of live direct-route success.

@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/bluesky-social/roast/internal/buildinfo"
+	"github.com/bluesky-social/roast/internal/chatgpt"
 	"github.com/bluesky-social/roast/internal/config"
 	"github.com/bluesky-social/roast/internal/gate"
 	"github.com/bluesky-social/roast/internal/llm"
@@ -124,6 +125,18 @@ func doctorChecks(ctx context.Context, configPath string) []doctorResult {
 			} else {
 				credential.Detail = "Codex CLI reports ChatGPT login"
 			}
+		} else if role.Protocol == "chatgpt" {
+			credentialContext, cancel := context.WithTimeout(ctx, 30*time.Second)
+			auth, err := chatgpt.New()
+			if err == nil {
+				_, err = auth.Token(credentialContext)
+			}
+			cancel()
+			if err != nil {
+				credential.Status, credential.Detail = doctorFail, err.Error()
+			} else {
+				credential.Detail = "Roast-managed ChatGPT account has a current plan-usage grant"
+			}
 		} else if strings.TrimSpace(role.APIKey) == "" {
 			credential.Status = doctorFail
 		}
@@ -161,7 +174,7 @@ func doctorRoundtripCheck(ctx context.Context, name string, role config.Resolved
 	}
 	// Allow Codex CLI startup and ChatGPT generation time for both turns.
 	requestTimeout, probeTimeout := 15*time.Second, 35*time.Second
-	if role.Protocol == "codex" {
+	if role.Protocol == "codex" || role.Protocol == "chatgpt" {
 		requestTimeout, probeTimeout = 120*time.Second, 250*time.Second
 	}
 	probeContext, cancel := context.WithTimeout(ctx, probeTimeout)
@@ -230,6 +243,24 @@ func doctorBuildCheck() doctorResult {
 }
 
 func doctorEndpointCheck(ctx context.Context, client *http.Client, name string, role config.ResolvedRole) doctorResult {
+	if role.Protocol == "chatgpt" {
+		catalogContext, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		auth, err := chatgpt.New()
+		if err != nil {
+			return doctorResult{name + "-endpoint", doctorFail, err.Error()}
+		}
+		models, err := auth.Models(catalogContext)
+		if err != nil {
+			return doctorResult{name + "-endpoint", doctorFail, err.Error()}
+		}
+		for _, model := range models {
+			if model.Slug == role.Model {
+				return doctorResult{name + "-endpoint", doctorPass, "selected model is in this ChatGPT account's current catalog"}
+			}
+		}
+		return doctorResult{name + "-endpoint", doctorFail, "configured model is not in this ChatGPT account's current catalog; run roast chatgpt models"}
+	}
 	if role.Protocol == "codex" {
 		return doctorResult{name + "-endpoint", doctorPass, "codex://chatgpt (CLI-managed service; no HTTP model listing)"}
 	}

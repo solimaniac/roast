@@ -92,7 +92,7 @@ export ROAST_VERIFIER_MODEL='verifier-model'
 export ROAST_VERIFIER_PROTOCOL='responses'
 ```
 
-HTTP protocols are `chat`, `responses`, and `anthropic` (native Messages, which
+API-key protocols are `chat`, `responses`, and `anthropic` (native Messages, which
 authenticates with `x-api-key` and defaults to `https://api.anthropic.com/v1`):
 
 ```sh
@@ -101,7 +101,7 @@ export ROAST_FINDER_MODEL='claude-model-name'
 export ROAST_FINDER_PROTOCOL='anthropic'
 ```
 
-For HTTP protocols, any base URL works, so a role can point at a hosted provider, a gateway, or a
+For API-key protocols, any base URL works, so a role can point at a hosted provider, a gateway, or a
 local server that implements the selected protocol.
 
 ### Config file
@@ -143,6 +143,124 @@ is selected. A literal `api_key` also works, but environment references are
 preferable. `version: 1` is required for new configs; Roast migrates its two
 legacy unversioned formats in memory, and rejects unknown fields and
 unsupported versions.
+
+### Direct ChatGPT plan usage
+
+This fork also has a separate `chatgpt` protocol implementing the official
+[Sign in with ChatGPT plan-usage flow](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference).
+Build this fork with Go 1.27.3 or newer (`go build -o roast ./cmd/roast`).
+Direct authentication currently supports Linux and macOS. On Windows it fails
+before reading credentials or starting OAuth, pending native secure-storage
+support. The other Roast backends are unchanged.
+
+```sh
+./roast chatgpt signin
+./roast chatgpt models
+```
+
+`signin` prints a **Continue with ChatGPT** authorization link. Open it in a
+browser on the same computer. The browser asks you to name/authorize Roast and
+approve plan access. Roast uses dynamic public-client registration, PKCE, a
+random state and nonce, and a `127.0.0.1` callback. No API key, client secret,
+partner registration, Codex installation, or Codex token extraction is needed.
+Only run this command when you intend to grant Roast ongoing plan access.
+Roast validates the signed ID token and granted scopes before using credentials.
+
+Choose model slugs from your account's live `models` catalog, then configure:
+
+```yaml
+version: 1
+inference_profiles:
+  plan_finder:
+    protocol: chatgpt
+    model: gpt-6.1-sol  # replace with a slug available to your account
+    max_output_tokens: 32768
+  plan_verifier:
+    protocol: chatgpt
+    model: gpt-6-astra  # replace with a slug available to your account
+    max_output_tokens: 32768
+roles:
+  finder:
+    profile: plan_finder
+  verifier:
+    profile: plan_verifier
+```
+
+Run `roast doctor --config /path/to/config.yaml` to check the grant, current model
+catalog, and an actual two-turn native function-tool loop for each role. A saved
+login alone is not proof of eligibility. Account/workspace/region policy and
+plan-usage limits still apply. There is no automatic API-key billing fallback.
+
+The `chatgpt` protocol preserves Roast's native agent loop: its prompts become
+Responses developer/user messages; its own scoped function tools are grouped
+in the `roast` namespace; tool results and finalized raw assistant output,
+including encrypted reasoning, are replayed in their original order. There is
+no additional Codex CLI harness or Codex-native tool execution. Only a valid
+`response.completed` permits dispatch; failed, incomplete, interrupted, or
+wrong-namespace streams cannot execute buffered tools. Run capture retains the
+original SSE bytes, and still must succeed before tool dispatch.
+
+The endpoint is fixed to `POST https://api.openai.com/v1/responses`, with
+`store: false` and `stream: true`. Profiles must omit `endpoint`, `api_key`,
+`api_key_env`, and `session_header`; role endpoint/key overrides are rejected.
+Ambient OpenAI keys, base URLs, organization/project IDs, and custom headers
+are not used. Redirects are not followed. This backend never uses ChatGPT
+`backend-api` routes. The documented preview's unsupported fields and hosted
+tools are not sent; Roast currently sends text prompts and text tool results.
+
+**Token budgets are soft limits on this route.** The preview rejects
+`max_output_tokens`, so that profile setting estimates admission headroom only,
+not a generation cap. An in-flight call can exceed Roast's token estimate.
+HTTP request deadlines remain enforced. Usage-limit failures stop the request
+and point to [ChatGPT usage settings](https://chatgpt.com/settings/usage), without
+inventing a reset time. Temporary admission availability failures use bounded retries;
+invalid capabilities and ineligible accounts are not retried unchanged.
+
+#### Accounts and protected credentials
+
+`roast chatgpt status` lists registrations without printing tokens.
+`roast chatgpt select CLIENT_ID` selects an account for subsequent processes.
+Each running model client pins its selected registration. Use
+`roast chatgpt signin --account CLIENT_ID` to reauthorize that registration.
+If identity sign-in succeeds without plan permission, Roast retains it but
+blocks inference. Only an explicit
+`roast chatgpt signin --account CLIENT_ID --enable-plan` asks for renewed consent.
+`login` is an alias for `signin`.
+
+Roast stores credentials separately under the operating-system user config
+directory's `roast/chatgpt/` subdirectory (for example,
+`~/.config/roast/chatgpt/` on Linux). `accounts.json` records the stable host ID,
+selected client ID, and registration list. Each credential filename is the
+SHA-256 hex digest of its issued client ID, followed by `.json`. Directory and
+file permissions are owner-only. Atomic writes and kernel-released locks
+serialize rotating-token refreshes across processes. A pending rotated token
+response is protected on disk before fallible validation, so a temporary JWKS
+failure does not lose the replacement refresh token. Tokens are never placed
+in Roast's YAML, run metadata, URLs printed for returning sign-in, or logs.
+
+`roast chatgpt signout [CLIENT_ID]` clears local tokens and attempts server-side
+revocation, retaining the registration identity for later sign-in. If revocation
+cannot be confirmed, it reports that separately. Disconnecting Roast in ChatGPT
+settings is not pushed to Roast; the next confirmed auth failure surfaces it.
+Do not commit, paste, or upload the credential directory or copy Codex auth files.
+
+For a self-hosted VM, follow the official
+[VM procedure](https://developers.openai.com/siwc/token-sharing-open-source/self-hosted-vms):
+run `roast chatgpt prepare-host` on the VM first, then complete OAuth locally
+using Roast for the same user/workspace. The command prints the target store
+path and its nonsecret host ID. Transfer only the selected Roast registration's
+protected credential file over a secure channel such as SSH. Update the VM's
+`accounts.json` registration list/active client while preserving its existing
+`host_id`, and retain owner-only permissions. Do not replace the VM's host ID
+with a laptop's ID. The VM must own subsequent refreshes; do not run concurrent
+copies of the same transferred session on different hosts. This release does
+not automate credential transfer. Host-specific usage attribution and revocation
+for transferred sessions are not yet provided by the service.
+
+See the official [preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)
+and [error recovery guide](https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery).
+The existing `codex` protocol below remains a separate fallback, not a substitute
+for a live direct-route test.
 
 ### Codex with a ChatGPT login
 
@@ -228,7 +346,7 @@ direct-model isolation, instruction hierarchy, or raw-response auditability.
 ### Credentials and precedence
 
 Command-line role flags override `ROAST_FINDER_*` / `ROAST_VERIFIER_*`
-variables, which override profiles. For HTTP protocols, a role's credential is the first of:
+variables, which override profiles. For API-key protocols, a role's credential is the first of:
 
 1. `ROAST_FINDER_API_KEY` or `ROAST_VERIFIER_API_KEY`;
 2. the profile's `api_key_env` or `api_key`;
