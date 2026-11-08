@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -57,8 +58,8 @@ func TestAsyncCallbackCompleteResponseOnFailure(t *testing.T) {
 				c := testClient(t)
 				seed(t, c, time.Now().Add(time.Hour))
 				c.http.Transport = transportFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("private-network-marker") })
-				var diagnostics bytes.Buffer
-				c.SetSignInDiagnostics(&diagnostics)
+				diagnostics := newSignInDiagnosticLog()
+				c.SetSignInDiagnostics(diagnostics)
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				cb, done := startAsyncSignIn(t, c, ctx)
 				if kind == "callback" {
@@ -79,9 +80,19 @@ func TestAsyncCallbackCompleteResponseOnFailure(t *testing.T) {
 					t.Fatal("sign-in stuck")
 				}
 				cancel()
-				for _, line := range strings.Split(strings.TrimSpace(diagnostics.String()), "\n") {
+				diagnostics.waitFor(t, "connection_closed")
+				text := diagnostics.String()
+				previous := -1
+				for _, event := range []string{"connection_opened", "connection_active", "callback_received", "connection_closed"} {
+					index := strings.Index(text, "chatgpt_signin:"+event+"\n")
+					if index <= previous {
+						t.Fatalf("missing or out-of-order phase: %s", event)
+					}
+					previous = index
+				}
+				for _, line := range strings.Split(strings.TrimSpace(text), "\n") {
 					switch line {
-					case "chatgpt_signin:listener_ready", "chatgpt_signin:callback_received", "chatgpt_signin:callback_failed", "chatgpt_signin:exchange_started":
+					case "chatgpt_signin:listener_ready", "chatgpt_signin:connection_opened", "chatgpt_signin:connection_active", "chatgpt_signin:connection_closed", "chatgpt_signin:callback_received", "chatgpt_signin:callback_failed", "chatgpt_signin:exchange_started":
 					default:
 						t.Fatalf("non-enum diagnostic: %q", line)
 					}
@@ -105,8 +116,8 @@ func TestAsyncCallbackRejectionsAndDuplicate(t *testing.T) {
 		}
 		return nil, errors.New("mock failure")
 	})
-	var diagnostics bytes.Buffer
-	c.SetSignInDiagnostics(&diagnostics)
+	diagnostics := newSignInDiagnosticLog()
+	c.SetSignInDiagnostics(diagnostics)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cb, done := startAsyncSignIn(t, c, ctx)
@@ -116,6 +127,8 @@ func TestAsyncCallbackRejectionsAndDuplicate(t *testing.T) {
 	} {
 		req, _ := http.NewRequest(rejection.method, cb.String(), nil)
 		req.Host = rejection.host
+		req.Header.Set("Authorization", "Bearer private-auth-marker")
+		req.Header.Set("Cookie", "session=private-cookie-marker")
 		res, err := (&http.Client{Timeout: time.Second}).Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -204,7 +217,7 @@ func TestSignInDiagnosticBoundary(t *testing.T) {
 	c := testClient(t)
 	var output bytes.Buffer
 	c.SetSignInDiagnostics(&output)
-	for _, value := range []string{"private-state", "http://127.0.0.1/?code=secret", "Authorization: secret", "listener_ready\nsecret"} {
+	for _, value := range []string{"private-state", "http://127.0.0.1/?code=secret", "Authorization: secret", "listener_ready\nsecret", "connection_opened\nsecret", "connection_active:secret", "connection_closed http://private-host/"} {
 		c.signInEvent(value)
 	}
 	if output.Len() != 0 {
@@ -259,4 +272,163 @@ func TestCallbackShutdownIsBounded(t *testing.T) {
 		t.Fatal("fallback close did not cancel active request")
 	}
 	<-requestDone
+}
+
+// ConnState close hooks can run just after SignIn returns, and tests also read
+// diagnostics while the server is waiting for request bytes.
+type signInDiagnosticLog struct {
+	mu      sync.Mutex
+	buffer  bytes.Buffer
+	changed chan struct{}
+}
+
+func newSignInDiagnosticLog() *signInDiagnosticLog {
+	return &signInDiagnosticLog{changed: make(chan struct{}, 1)}
+}
+
+func (d *signInDiagnosticLog) Write(p []byte) (int, error) {
+	d.mu.Lock()
+	n, err := d.buffer.Write(p)
+	d.mu.Unlock()
+	select {
+	case d.changed <- struct{}{}:
+	default:
+	}
+	return n, err
+}
+
+func (d *signInDiagnosticLog) String() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.buffer.String()
+}
+
+func (d *signInDiagnosticLog) waitFor(t *testing.T, event string) {
+	t.Helper()
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	for !strings.Contains(d.String(), "chatgpt_signin:"+event+"\n") {
+		select {
+		case <-d.changed:
+		case <-timer.C:
+			t.Fatalf("missing diagnostic: %s", event)
+		}
+	}
+}
+
+func TestAsyncCallbackConnectionBeforeHTTP(t *testing.T) {
+	for _, kind := range []string{"no request", "incomplete request", "malformed request"} {
+		t.Run(kind, func(t *testing.T) {
+			c := testClient(t)
+			seed(t, c, time.Now().Add(time.Hour))
+			c.http.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
+				return nil, errors.New("unexpected exchange")
+			})
+			diagnostics := newSignInDiagnosticLog()
+			c.SetSignInDiagnostics(diagnostics)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			cb, done := startAsyncSignIn(t, c, ctx)
+			conn, err := net.DialTimeout("tcp4", cb.Host, time.Second)
+			if err != nil {
+				t.Fatal("cannot connect to test callback")
+			}
+			defer conn.Close()
+			diagnostics.waitFor(t, "connection_opened")
+			want := "chatgpt_signin:listener_ready\nchatgpt_signin:connection_opened\n"
+			if diagnostics.String() != want {
+				t.Fatal("unexpected phase before sending request bytes")
+			}
+			if kind != "no request" {
+				// These are synthetic sentinels, never real credentials. Neither
+				// incomplete headers nor a malformed protocol reaches the handler.
+				raw := "GET /private-path-marker?code=private-code-marker&state=private-state-marker HTTP/1.1\r\nHost: " + cb.Host + "\r\nAuthorization: Bearer private-auth-marker\r\nCookie: session=private-cookie-marker\r\n"
+				if kind == "malformed request" {
+					raw = strings.Replace(raw, "HTTP/1.1", "HTTP/private-protocol-marker", 1) + "\r\n"
+				}
+				if _, err := io.WriteString(conn, raw); err != nil {
+					t.Fatal("cannot write synthetic request")
+				}
+				want += "chatgpt_signin:connection_active\n"
+			}
+			_ = conn.Close()
+			diagnostics.waitFor(t, "connection_closed")
+			want += "chatgpt_signin:connection_closed\n"
+			if diagnostics.String() != want {
+				t.Fatal("unexpected phase or request data in connection diagnostics")
+			}
+			cancel()
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatal("unexpected sign-in result")
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("sign-in did not stop")
+			}
+			if diagnostics.String() != want+"chatgpt_signin:canceled\n" {
+				t.Fatal("unexpected phase or request data after cancellation")
+			}
+		})
+	}
+}
+
+func TestAsyncCallbackConnectionClosedOnCancellation(t *testing.T) {
+	c := testClient(t)
+	seed(t, c, time.Now().Add(time.Hour))
+	diagnostics := newSignInDiagnosticLog()
+	c.SetSignInDiagnostics(diagnostics)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cb, done := startAsyncSignIn(t, c, ctx)
+	conn, err := net.DialTimeout("tcp4", cb.Host, time.Second)
+	if err != nil {
+		t.Fatal("cannot connect to test callback")
+	}
+	defer conn.Close()
+	diagnostics.waitFor(t, "connection_opened")
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatal("unexpected sign-in result")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("open connection prevented bounded shutdown")
+	}
+	diagnostics.waitFor(t, "connection_closed")
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal("cannot set test read deadline")
+	}
+	var b [1]byte
+	if _, err := conn.Read(b[:]); !errors.Is(err, io.EOF) {
+		t.Fatal("callback connection was not closed")
+	}
+	if late, err := net.DialTimeout("tcp4", cb.Host, time.Second); err == nil {
+		late.Close()
+		t.Fatal("callback listener remained open")
+	}
+	want := "chatgpt_signin:listener_ready\nchatgpt_signin:connection_opened\nchatgpt_signin:canceled\nchatgpt_signin:connection_closed\n"
+	if diagnostics.String() != want {
+		t.Fatal("unexpected cleanup diagnostic")
+	}
+}
+
+func TestCallbackConnectionDiagnosticBoundary(t *testing.T) {
+	c := testClient(t)
+	var output bytes.Buffer
+	c.SetSignInDiagnostics(&output)
+	hook := callbackConnState(c.signInDiagnostic)
+	// The callback must neither inspect the connection (nil is deliberate) nor
+	// read a replaced setting during a late close notification.
+	c.SetSignInDiagnostics(nil)
+	for _, state := range []http.ConnState{http.StateNew, http.StateActive, http.StateIdle, http.StateHijacked, http.StateClosed, http.ConnState(-1), http.ConnState(99)} {
+		hook(nil, state)
+	}
+	if output.String() != "chatgpt_signin:connection_opened\nchatgpt_signin:connection_active\nchatgpt_signin:connection_closed\n" {
+		t.Fatal("connection state escaped fixed event mapping")
+	}
+	if callbackConnState(c.signInDiagnostic) != nil {
+		t.Fatal("disabled diagnostics installed a connection hook")
+	}
 }
