@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -208,7 +209,7 @@ func TestCodexRejectsAPIKeyLogin(t *testing.T) {
 }
 
 func TestCodexCancellationStopsProcess(t *testing.T) {
-	fakeCodex(t, "exec sleep 30\n")
+	fakeCodex(t, "echo 'Read-only file system; 401 Unauthorized private-stderr-sentinel' >&2\nprintf '%s\\n' '{\"type\":\"turn.failed\",\"error\":{\"message\":\"401 Unauthorized private-event-sentinel\"}}'\nexec sleep 30\n")
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
 	m := &codexModel{cfg: ClientConfig{Model: "test"}}
@@ -218,12 +219,68 @@ func TestCodexCancellationStopsProcess(t *testing.T) {
 	}
 }
 
-func TestCodexDiagnosticsDoNotExposeStderr(t *testing.T) {
-	fakeCodex(t, "echo 'secret-value Read-only file system' >&2; exit 1\n")
-	m := &codexModel{cfg: ClientConfig{Model: "test"}}
-	_, err := m.runCLI(t.Context(), []byte("prompt"), []byte(`{}`))
-	if err == nil || !strings.Contains(err.Error(), "read-only runtime home") || strings.Contains(err.Error(), "secret-value") {
-		t.Fatalf("error=%v", err)
+func TestCodexReadOnlyWarningDiagnostics(t *testing.T) {
+	const warning = "WARNING: Read-only file system (os error 30): private-stderr-sentinel"
+	const unknownFailure = "codex exec failed; stderr included a read-only filesystem diagnostic, but the failing operation is unknown"
+	const inferenceFailure = "codex inference failed; check subscription limits and model access"
+	const argumentFailure = "installed Codex CLI does not support this adapter's required options; update the official CLI"
+	modelFailure := []byte(`{"type":"error","message":"model unavailable: private-event-sentinel"}` + "\n")
+	authFailure := []byte(`{"type":"turn.failed","error":{"message":"401 Unauthorized private-event-sentinel"}}` + "\n")
+	for _, tc := range []struct {
+		name     string
+		events   []byte
+		stderr   string
+		exitCode int
+		want     string
+		wantAuth bool
+	}{
+		{name: "warning-only", exitCode: 1, want: unknownFailure},
+		{name: "structured-error", events: modelFailure, exitCode: 1, want: inferenceFailure},
+		{name: "structured-error-zero-exit", events: modelFailure, want: inferenceFailure},
+		{name: "structured-turn-failed", events: []byte(`{"type":"turn.failed","error":{"message":"model unavailable: private-event-sentinel"}}`), exitCode: 1, want: inferenceFailure},
+		{name: "unexpected-argument", stderr: "error: unexpected argument --private-option-sentinel", exitCode: 2, want: argumentFailure},
+		{name: "unrecognized-option", stderr: "error: unrecognized option --private-option-sentinel", exitCode: 2, want: argumentFailure},
+		{name: "unrecognized-subcommand", stderr: "error: unrecognized subcommand private-command-sentinel", exitCode: 2, want: argumentFailure},
+		{name: "unrecognized-warning", stderr: "warning: unrecognized config value private-option-sentinel", exitCode: 1, want: unknownFailure},
+		{name: "argument-warning", stderr: "warning: unexpected argument private-option-sentinel", exitCode: 1, want: unknownFailure},
+		{name: "stderr-auth-over-structured-error", events: modelFailure, stderr: "403 Forbidden private-auth-sentinel", exitCode: 1, want: codexAuthenticationError().Error(), wantAuth: true},
+		{name: "structured-auth-after-error", events: append(append([]byte(nil), modelFailure...), authFailure...), exitCode: 1, want: codexAuthenticationError().Error(), wantAuth: true},
+		{name: "auth-over-argument", events: authFailure, stderr: "error: unexpected argument --private-option-sentinel", exitCode: 1, want: codexAuthenticationError().Error(), wantAuth: true},
+		{name: "completed-but-nonzero", events: codexEvents("read", `{}`), exitCode: 1, want: unknownFailure},
+		{name: "successful-response", events: codexEvents("read", `{}`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeCodex(t, "printf '%s\\n' '"+warning+"\n"+tc.stderr+"' >&2\nprintf '%s' '"+string(tc.events)+"'\nexit "+strconv.Itoa(tc.exitCode)+"\n")
+			captured := 0
+			m := &codexModel{cfg: ClientConfig{Model: "test", CaptureResponse: func(r RawResponse) error {
+				captured++
+				if strings.Contains(string(r.Body), "sentinel") || strings.Contains(string(r.Body), "Read-only") {
+					t.Fatal("CLI diagnostic was captured")
+				}
+				return nil
+			}}}
+			m.run = m.runCLI
+			stream, err := m.Stream(t.Context(), fantasy.Call{Tools: []fantasy.Tool{fantasy.FunctionTool{Name: "read"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var parts []fantasy.StreamPart
+			for part := range stream {
+				parts = append(parts, part)
+			}
+			if tc.want == "" {
+				if captured != 1 || len(parts) != 2 || parts[0].Type != fantasy.StreamPartTypeToolCall || parts[0].ToolCallName != "read" || parts[1].Type != fantasy.StreamPartTypeFinish {
+					t.Fatalf("warning blocked successful response: captured=%d parts=%+v", captured, parts)
+				}
+				return
+			}
+			if captured != 0 || len(parts) != 1 || parts[0].Type != fantasy.StreamPartTypeError {
+				t.Fatalf("failed subprocess captured or dispatched a response: captured=%d parts=%+v", captured, parts)
+			}
+			if err := parts[0].Error; err == nil || err.Error() != tc.want || errors.Is(err, ErrAuth) != tc.wantAuth {
+				t.Fatalf("error=%v, want %q (auth=%t)", err, tc.want, tc.wantAuth)
+			}
+		})
 	}
 }
 
@@ -269,11 +326,11 @@ func TestCodexInferenceAuthenticationDiagnostics(t *testing.T) {
 		[]byte(`{"type":"turn.failed","error":{"message":"refresh_token_expired private-detail"}}`),
 	} {
 		_, _, err := parseCodexEvents(data, map[string]bool{"read": true})
-		if !errors.Is(err, ErrAuth) || strings.Contains(err.Error(), "private-detail") || !codexEventsReportAuthFailure(data) {
+		if !errors.Is(err, ErrAuth) || strings.Contains(err.Error(), "private-detail") || !errors.Is(codexEventsFailure(data), ErrAuth) {
 			t.Fatalf("error=%v", err)
 		}
 	}
-	if codexEventsReportAuthFailure(codexEvents("submit", `{"answer":"401 Unauthorized"}`)) {
+	if codexEventsFailure(codexEvents("submit", `{"answer":"401 Unauthorized"}`)) != nil {
 		t.Fatal("generated content treated as an authentication diagnostic")
 	}
 }
