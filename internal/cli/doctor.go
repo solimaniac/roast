@@ -126,16 +126,7 @@ func doctorChecks(ctx context.Context, configPath string) []doctorResult {
 		}
 		role := roles[i]
 		credential := doctorResult{name + "-credential", doctorPass, role.Credential.String()}
-		if role.Protocol == "codex" {
-			loginContext, cancel := context.WithTimeout(ctx, 15*time.Second)
-			err := llm.CheckCodexLogin(loginContext)
-			cancel()
-			if err != nil {
-				credential.Status, credential.Detail = doctorFail, err.Error()
-			} else {
-				credential.Detail = "Codex CLI reports ChatGPT login"
-			}
-		} else if role.Protocol == "chatgpt" {
+		if role.Protocol == "chatgpt" {
 			credentialContext, cancel := context.WithTimeout(ctx, 30*time.Second)
 			err := llm.CheckChatGPTLogin(credentialContext)
 			cancel()
@@ -179,9 +170,9 @@ func doctorRoundtripCheck(ctx context.Context, name string, role config.Resolved
 	if maxOutputTokens <= 0 || maxOutputTokens > 512 {
 		maxOutputTokens = 512
 	}
-	// Allow Codex CLI startup and ChatGPT generation time for both turns.
+	// Allow ChatGPT generation time for both turns.
 	requestTimeout, probeTimeout := 15*time.Second, 35*time.Second
-	if role.Protocol == "codex" || role.Protocol == "chatgpt" {
+	if role.Protocol == "chatgpt" {
 		requestTimeout, probeTimeout = 120*time.Second, 250*time.Second
 	}
 	probeContext, cancel := context.WithTimeout(ctx, probeTimeout)
@@ -263,9 +254,6 @@ func doctorEndpointCheck(ctx context.Context, client *http.Client, name string, 
 			}
 		}
 		return doctorResult{name + "-endpoint", doctorFail, "configured model is not in this ChatGPT account's current catalog; run roast chatgpt models"}
-	}
-	if role.Protocol == "codex" {
-		return doctorResult{name + "-endpoint", doctorPass, "codex://chatgpt (CLI-managed service; no HTTP model listing)"}
 	}
 	endpoint := strings.TrimRight(role.BaseURL, "/") + "/models"
 	if _, err := url.ParseRequestURI(endpoint); err != nil {

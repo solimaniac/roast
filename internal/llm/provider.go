@@ -72,9 +72,6 @@ func New(ctx context.Context, cfg ClientConfig) (Client, error) {
 	if cfg.Protocol == "chatgpt" {
 		return newChatGPTClient(ctx, cfg)
 	}
-	if cfg.Protocol == "codex" {
-		return newCodexClient(ctx, cfg)
-	}
 	if strings.TrimSpace(cfg.APIKey) == "" {
 		// Fantasy omits an empty key, and the SDKs then fall back to ambient
 		// credentials: environment variables, profile files, or federation.
@@ -148,7 +145,7 @@ func (c *client) addUsage(providerUsage fantasy.Usage) Usage {
 	// chatgpt deliberately stays out of this branch: the pinned Fantasy
 	// Responses adapter already subtracts cached input in responsesUsage.
 	// Its end-to-end wire test guards against subtracting that cache twice.
-	if c.cfg.Protocol == "" || c.cfg.Protocol == "chat" || c.cfg.Protocol == "responses" || c.cfg.Protocol == "codex" {
+	if c.cfg.Protocol == "" || c.cfg.Protocol == "chat" || c.cfg.Protocol == "responses" {
 		cacheRead = min(cacheRead, input)
 		cacheWrite = min(cacheWrite, input-cacheRead)
 		uncached = input - cacheRead - cacheWrite

@@ -28,9 +28,6 @@ const (
 
 // DefaultBaseURL returns the public default endpoint for a wire protocol.
 func DefaultBaseURL(protocol string) string {
-	if protocol == "codex" {
-		return "codex://chatgpt"
-	}
 	if protocol == "anthropic" {
 		return defaultAnthropicBaseURL
 	}
@@ -91,7 +88,6 @@ const (
 	CredentialProfileKey   = "profile_api_key"
 	CredentialProviderEnv  = "provider_env"
 	CredentialNone         = "none"
-	CredentialCodexLogin   = "codex_login"
 	CredentialChatGPTLogin = "chatgpt_login"
 )
 
@@ -110,8 +106,6 @@ func (s CredentialSource) String() string {
 	switch s.Kind {
 	case CredentialChatGPTLogin:
 		return "Roast-managed Sign in with ChatGPT (not verified)"
-	case CredentialCodexLogin:
-		return "Codex CLI-managed ChatGPT login (not verified)"
 	case CredentialRoleEnv:
 		return s.Env + " (role override)"
 	case CredentialProfileEnv:
@@ -595,9 +589,6 @@ func (p InferenceProfile) DescribeEndpoint() string {
 	if p.Protocol == "chatgpt" {
 		return defaultOpenAIBaseURL + " (ChatGPT plan usage; fixed public endpoint)"
 	}
-	if p.Protocol == "codex" {
-		return "codex://chatgpt (Codex CLI-managed ChatGPT service)"
-	}
 	if p.BaseURL != "" {
 		return p.BaseURL
 	}
@@ -609,9 +600,6 @@ func (p InferenceProfile) DescribeEndpoint() string {
 func (p InferenceProfile) DescribeCredential(role string) string {
 	if p.Protocol == "chatgpt" {
 		return (CredentialSource{Kind: CredentialChatGPTLogin}).String()
-	}
-	if p.Protocol == "codex" {
-		return (CredentialSource{Kind: CredentialCodexLogin}).String()
 	}
 	roleVar := roleEnvPrefix(role) + "API_KEY"
 	keyVar := providerAPIKeyEnv(p.Protocol)
@@ -720,9 +708,6 @@ func resolveCredential(roleName string, profile InferenceProfile, role ResolvedR
 func ambientCredential(protocol, endpoint string) (string, CredentialSource) {
 	if protocol == "chatgpt" {
 		return "", CredentialSource{Kind: CredentialChatGPTLogin}
-	}
-	if protocol == "codex" {
-		return "", CredentialSource{Kind: CredentialCodexLogin}
 	}
 	keyVar := providerAPIKeyEnv(protocol)
 	value := os.Getenv(keyVar)
@@ -982,20 +967,11 @@ func ValidateRole(name string, role ResolvedRole) error {
 	return validateEndpoint(name, role.BaseURL, role.Protocol, role.MaxOutputTokens)
 }
 
-func managedLogin(protocol string) bool { return protocol == "codex" || protocol == "chatgpt" }
+func managedLogin(protocol string) bool { return protocol == "chatgpt" }
 
 func validateEndpoint(name, baseURL, protocol string, maxOutputTokens int) error {
 	if protocol == "chatgpt" && baseURL != defaultOpenAIBaseURL {
 		return fmt.Errorf("%s: chatgpt requires the fixed public https://api.openai.com/v1 endpoint", name)
-	}
-	if protocol == "codex" {
-		if baseURL != "codex://chatgpt" {
-			return fmt.Errorf("%s: codex endpoint must be the CLI-managed codex://chatgpt sentinel", name)
-		}
-		if maxOutputTokens <= 0 {
-			return fmt.Errorf("%s max_output_tokens must be positive", name)
-		}
-		return nil
 	}
 	u, err := url.Parse(baseURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
@@ -1004,7 +980,7 @@ func validateEndpoint(name, baseURL, protocol string, maxOutputTokens int) error
 	switch protocol {
 	case "chat", "responses", "anthropic", "chatgpt":
 	default:
-		return fmt.Errorf("%s protocol must be chat, responses, anthropic, codex, or chatgpt", name)
+		return fmt.Errorf("%s protocol must be chat, responses, anthropic, or chatgpt", name)
 	}
 	if maxOutputTokens <= 0 {
 		return fmt.Errorf("%s max_output_tokens must be positive", name)

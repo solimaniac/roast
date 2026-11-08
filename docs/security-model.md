@@ -14,8 +14,7 @@ file.
 
 ## Direct ChatGPT plan usage
 
-The opt-in `chatgpt` protocol is a direct Responses provider, separate from the
-`codex` CLI adapter. It addresses the architectural concerns described in
+The opt-in `chatgpt` protocol is a direct Responses provider. It addresses the architectural concerns described in
 [upstream issue 127](https://github.com/bluesky-social/roast/issues/127#issuecomment-6693962921):
 Roast retains its own agent loop, scoped read-only exploration tools, final
 submission schema validation, and raw provider-response records. It does not
@@ -50,63 +49,7 @@ preserve the target host identity; see the README and official VM guide.
 The preview rejects `max_output_tokens`: output estimates and shared token
 budgets are soft, while request deadlines still apply. A saved grant and mocked
 tests do not prove a particular account/model is eligible. Run the separately
-authorized two-turn `roast doctor` or opt-in live test to verify it. The retained
-`codex` fallback below does not gain these direct-provider properties.
-
-## Codex CLI and ChatGPT login
-
-The opt-in `codex` protocol sends review prompts and selected repository
-material through the official Codex CLI using its ChatGPT login. The CLI and
-its installation are trusted dependencies. Roast does not extract or copy
-OAuth/session tokens, and does not use API credentials for this route.
-`codex://chatgpt` records this CLI-managed destination in provenance; it is not
-an HTTP service or a user-configurable endpoint. `codex_login` describes the
-credential mechanism without claiming that a login has been verified.
-`roast doctor` asks the CLI to check login and runs a synthetic two-turn probe.
-
-Each inference subprocess receives an allowlisted operating-system environment,
-a fresh private temporary working directory, no user config or project docs,
-read-only sandboxing, and disabled shell, browser, image, plugin, and hook
-features. Roast sends the prompt on stdin instead of command-line arguments.
-Subprocess output is bounded, raw diagnostics are never surfaced, and native
-tool events or incomplete responses are rejected before Roast dispatches a tool.
-Run capture stores only the final tool envelope and usage, not CLI session IDs
-or raw diagnostic events. Temporary prompt/schema/runtime artifacts are removed
-at the end of the call. The CLI remains responsible for its login storage and
-may need to update its own runtime home; use a writable installation.
-
-Codex profiles reject explicit endpoints, API keys, key environment variables,
-and session headers. Endpoint and role API-key overrides are rejected;
-ambient OpenAI API credentials and base URLs are ignored. Set up login with
-`codex login`, outside Roast. ChatGPT plan/model access and usage limits apply.
-For this protocol `max_output_tokens` is only an admission estimate: the CLI
-cannot enforce Roast's output-token ceiling, and token budgets are soft limits.
-
-### The CLI remains a separate agent harness
-
-The adapter does not call the raw model directly. It serializes Roast's original
-message roles, history, and tool schemas into one CLI user prompt. A serialized
-`system` label is data, not a native API system instruction. Codex's own
-system/developer instructions, policy machinery, model-specific tools, and
-centrally managed settings remain in effect and may change with CLI versions.
-This changes the instruction hierarchy and adds a trust boundary compared with
-Roast's direct HTTP providers.
-
-Disabled feature flags and read-only sandboxing reduce capability but do not
-remove all native tool definitions. For example, Codex can expose `apply_patch`
-while the sandbox denies writes, and model-specific utility tools can remain.
-Rejecting an unexpected/native item prevents subsequent Roast tool dispatch;
-it cannot undo or prove the absence of an action the CLI already attempted.
-Do not treat the adapter's post-execution event checks as a pre-execution tool
-allowlist or a replacement for the CLI's sandbox.
-
-For `protocol: codex`, durable response capture is synthesized from the final
-structured envelope and CLI-reported usage. It omits original provider SSE,
-internal prompts, and internal agent steps. A usage `calls` count is a count of
-CLI invocations, not a count of underlying model requests. Consequently this
-backend preserves Roast's outer review/verification workflow but does not claim
-identical adversarial isolation, instruction priority, accounting, or audit
-replay guarantees to a direct-model provider.
+authorized two-turn `roast doctor` or opt-in live test to verify it. This fork has no Codex CLI inference fallback.
 
 ## Configuration templates
 

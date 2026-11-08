@@ -25,18 +25,12 @@ the profile example in the Configure section of the Roast README
 operator supplies. A profile selects an endpoint, model, wire protocol
 (`responses`, `chat`, or `anthropic`), credential environment variable, and
 output limit. The finder and verifier may use different profiles and protocols.
-The `codex` protocol uses the official Codex CLI ChatGPT login, with no endpoint,
-API key, key environment variable, or session header. Run `codex login` for
-setup and `roast doctor` to verify it; never extract login tokens. For Codex,
-`max_output_tokens` is an admission estimate, not a hard cap, and token budgets
-are soft limits. ChatGPT account and Codex model limits still apply.
-
 The fork's `chatgpt` protocol uses a separate official Sign in with ChatGPT
 registration and direct public Responses API calls, keeping Roast's native
 prompt and tool loop. Explicitly authorize with `roast chatgpt signin`, list
 account-available slugs with `roast chatgpt models`, then run `roast doctor` for
 live two-turn probes. Never read Codex tokens or silently use API billing.
-Like Codex mode, `max_output_tokens` is only an admission estimate here; the
+`max_output_tokens` is only an admission estimate here; the
 plan-usage preview rejects a hard generation cap. Raw SSE and finalized reasoning
 history are retained. Direct sign-in supports Linux/macOS, not Windows yet.
 A configured profile, saved login, or mock test is not a live validation.
