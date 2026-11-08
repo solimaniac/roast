@@ -205,6 +205,12 @@ func (c *Client) Token(ctx context.Context) (string, error) {
 		if !hasScope(v.Scopes, "chatgpt.tokens.use.direct") || !hasScope(v.Scopes, "resource.invoke") {
 			return errors.New("ChatGPT plan usage permission was removed; enable it explicitly before inference")
 		}
+		// Validation may outlast a short-lived access token. Keep the rotated
+		// credentials for the next attempt, but never send an expired token to
+		// inference or refresh repeatedly within this call.
+		if !c.now().Before(v.ExpiresAt) {
+			return fmt.Errorf("%w: refreshed token expired during validation; retry", ErrNetwork)
+		}
 		token = v.AccessToken
 		return nil
 	})

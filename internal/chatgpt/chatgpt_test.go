@@ -739,3 +739,70 @@ func TestPendingRefreshRejectsInvalidReceiptOrExpiredIdentity(t *testing.T) {
 		})
 	}
 }
+
+func TestRefreshRechecksExpiryAfterValidation(t *testing.T) {
+	for _, delay := range []time.Duration{0, time.Second, 2 * time.Second} {
+		t.Run(delay.String(), func(t *testing.T) {
+			c := testClient(t)
+			received := time.Now().UTC().Truncate(time.Second)
+			now := received
+			c.now = func() time.Time { return now }
+			seed(t, c, received.Add(-time.Minute))
+			key := signingKey(t)
+			cl := claims("")
+			cl["iat"] = received.Unix()
+			cl["exp"] = received.Add(time.Hour).Unix()
+			refreshes := 0
+			c.http.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+				switch r.URL.String() {
+				case tokenURL:
+					refreshes++
+					if err := r.ParseForm(); err != nil {
+						t.Fatal(err)
+					}
+					want := "refresh"
+					if refreshes > 1 {
+						want = "rotated-refresh"
+					}
+					if r.Form.Get("refresh_token") != want {
+						t.Fatal("reused consumed refresh token")
+					}
+					if refreshes == 1 {
+						return response(tokenResponse{AccessToken: "short-access", RefreshToken: "rotated-refresh", IDToken: signed(t, key, cl), TokenType: "Bearer", ExpiresIn: 1, Scope: Scope}), nil
+					}
+					return response(tokenResponse{AccessToken: "fresh-access", RefreshToken: "fresh-refresh", TokenType: "Bearer", ExpiresIn: 3600, Scope: Scope}), nil
+				case jwksURL:
+					now = received.Add(delay)
+					return response(jwks(key)), nil
+				default:
+					t.Fatal("unexpected request")
+					return nil, nil
+				}
+			})
+			token, err := c.Token(context.Background())
+			if delay == 0 {
+				if err != nil || token != "short-access" {
+					t.Fatalf("valid token rejected: %v", err)
+				}
+				return
+			}
+			if token != "" || !errors.Is(err, ErrNetwork) || errors.Is(err, ErrAuth) {
+				t.Fatalf("expired refresh must return a retryable error and no token: %v", err)
+			}
+			if refreshes != 1 {
+				t.Fatal("retried refresh within the same call")
+			}
+			saved, err := c.load(c.selected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if saved.Pending != nil || saved.RefreshToken != "rotated-refresh" || !saved.ExpiresAt.Equal(received.Add(time.Second)) {
+				t.Fatal("rotated credentials were not preserved with their original expiry")
+			}
+			token, err = c.Token(context.Background())
+			if err != nil || token != "fresh-access" || refreshes != 2 {
+				t.Fatalf("next call failed to recover using rotated credentials: %v", err)
+			}
+		})
+	}
+}
