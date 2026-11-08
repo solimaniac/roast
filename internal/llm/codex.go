@@ -188,8 +188,12 @@ func (m *codexModel) runCLI(ctx context.Context, prompt, schema []byte) ([]byte,
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if codexEventsReportAuthFailure(output.Bytes()) {
+		failure := codexEventsFailure(output.Bytes())
+		if errors.Is(failure, ErrAuth) || codexAuthDiagnostic(stderr.String()) {
 			return nil, codexAuthenticationError()
+		}
+		if failure != nil {
+			return nil, failure
 		}
 		return nil, codexCLIError(err, stderr.String())
 	}
@@ -201,11 +205,14 @@ func codexCLIError(err error, stderr string) error {
 	if codexAuthDiagnostic(stderr) {
 		return codexInferenceFailure(stderr)
 	}
-	if strings.Contains(stderr, "Read-only file system") {
-		return errors.New("codex cannot initialize in its read-only runtime home; use an existing writable Codex installation or sign in with the official CLI in a writable CODEX_HOME (do not copy login tokens)")
+	for _, line := range strings.Split(stderr, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "error: unexpected argument ") || strings.HasPrefix(line, "error: unrecognized option ") || strings.HasPrefix(line, "error: unrecognized subcommand ") {
+			return errors.New("installed Codex CLI does not support this adapter's required options; update the official CLI")
+		}
 	}
-	if strings.Contains(stderr, "unexpected argument") || strings.Contains(stderr, "unrecognized") {
-		return errors.New("installed Codex CLI does not support this adapter's required options; update the official CLI")
+	if strings.Contains(stderr, "Read-only file system") {
+		return errors.New("codex exec failed; stderr included a read-only filesystem diagnostic, but the failing operation is unknown")
 	}
 	var exit *exec.ExitError
 	if errors.As(err, &exit) {
@@ -244,16 +251,21 @@ type codexFailureEvent struct {
 }
 
 // Inspect only error-event diagnostics, never generated messages/tool content.
-func codexEventsReportAuthFailure(data []byte) bool {
+// Authentication failures take precedence even after another failure event.
+func codexEventsFailure(data []byte) error {
+	var failure error
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	scanner.Buffer(make([]byte, 4096), maxCapturedResponseSize)
 	for scanner.Scan() {
 		var event codexFailureEvent
-		if json.Unmarshal(scanner.Bytes(), &event) == nil && (event.Type == "error" || event.Type == "turn.failed") && codexAuthDiagnostic(event.Message+" "+event.Error.Message) {
-			return true
+		if json.Unmarshal(scanner.Bytes(), &event) == nil && (event.Type == "error" || event.Type == "turn.failed") {
+			failure = codexInferenceFailure(event.Message + " " + event.Error.Message)
+			if errors.Is(failure, ErrAuth) {
+				return failure
+			}
 		}
 	}
-	return false
+	return failure
 }
 
 func codexArgs(model, dir, schema string) []string {
