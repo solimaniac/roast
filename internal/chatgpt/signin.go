@@ -32,6 +32,8 @@ func signInContext(parent context.Context) (context.Context, context.CancelFunc)
 
 // SetSignInDiagnostics enables fixed, value-free sign-in events. Configure it
 // before starting sign-in; nil disables diagnostics. It never logs request data.
+// A final connection-close event may reach w just after SignIn returns; concurrent
+// readers of w must synchronize access. Writes by this emitter are serialized.
 func (c *Client) SetSignInDiagnostics(w io.Writer) {
 	if w == nil {
 		c.signInDiagnostic = nil
@@ -46,12 +48,36 @@ func (c *Client) SetSignInDiagnostics(w io.Writer) {
 }
 
 func (c *Client) signInEvent(event string) {
+	emitSignInEvent(c.signInDiagnostic, event)
+}
+
+func emitSignInEvent(diagnostic func(string), event string) {
 	// Keep this allowlist at the output boundary: even an accidental dynamic
 	// argument must never expose authorization data.
 	switch event {
-	case "listener_ready", "listener_failed", "rejected_method", "rejected_path", "rejected_host", "rejected_state", "rejected_duplicate", "callback_received", "callback_failed", "exchange_started", "canceled", "timed_out":
-		if c.signInDiagnostic != nil {
-			c.signInDiagnostic(event)
+	case "listener_ready", "listener_failed", "connection_opened", "connection_active", "connection_closed", "rejected_method", "rejected_path", "rejected_host", "rejected_state", "rejected_duplicate", "callback_received", "callback_failed", "exchange_started", "canceled", "timed_out":
+		if diagnostic != nil {
+			diagnostic(event)
+		}
+	}
+}
+
+func callbackConnState(diagnostic func(string)) func(net.Conn, http.ConnState) {
+	if diagnostic == nil {
+		return nil
+	}
+	// Capture the configured emitter: a final close hook can run after Shutdown
+	// returns. Never inspect the connection, its addresses, or its payload.
+	return func(_ net.Conn, state http.ConnState) {
+		switch state {
+		case http.StateNew:
+			emitSignInEvent(diagnostic, "connection_opened")
+		case http.StateActive:
+			// Active means request bytes were read, not that HTTP was valid or
+			// that the callback handler ran.
+			emitSignInEvent(diagnostic, "connection_active")
+		case http.StateClosed:
+			emitSignInEvent(diagnostic, "connection_closed")
 		}
 	}
 }
@@ -173,7 +199,7 @@ func (c *Client) signIn(ctx context.Context, clientID string, consent bool, show
 		}
 		result := make(chan callback, 1)
 		var once sync.Once
-		server := &http.Server{ReadHeaderTimeout: 5 * time.Second, ErrorLog: log.New(io.Discard, "", 0), Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server := &http.Server{ReadHeaderTimeout: 5 * time.Second, ErrorLog: log.New(io.Discard, "", 0), ConnState: callbackConnState(c.signInDiagnostic), Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("Content-Security-Policy", "default-src 'none'")
 			w.Header().Set("Referrer-Policy", "no-referrer")

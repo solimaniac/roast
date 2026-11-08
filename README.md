@@ -234,8 +234,12 @@ still ends the attempt.
 
 For troubleshooting, add `--diagnostics` to `signin`. Its diagnostic output on
 stderr contains only fixed phase/rejection events, not request values or
-credentials. Do not share callback URLs or credential files. These events help
-distinguish a missing browser callback from a rejected callback or token exchange.
+credentials. Do not share callback URLs or credential files. Connection events
+(`connection_opened`, `connection_active`, `connection_closed`) report accepted
+TCP connections, request bytes read, and closure, without addresses or payloads.
+An active connection does not prove a valid HTTP request or callback reached the
+handler. Together with rejection/callback/exchange events, they narrow where a
+failure happens, but do not establish its cause.
 In hosted-browser environments, confirm that the browser and Roast's listener
 run on the same host: the redirect must use the exact issued
 `http://127.0.0.1:PORT/auth/callback` URL, including its port and path. A browser
