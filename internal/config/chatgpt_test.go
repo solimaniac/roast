@@ -113,3 +113,10 @@ func TestChatGPTProtocolEnvironmentOverride(t *testing.T) {
 		}
 	}
 }
+
+func TestCodexCLIProtocolRejected(t *testing.T) {
+	_, err := normalizeProfile("finder", InferenceProfile{Protocol: "codex", Model: "gpt-test"})
+	if err == nil {
+		t.Fatal("Codex CLI protocol accepted; no implicit inference fallback is allowed")
+	}
+}

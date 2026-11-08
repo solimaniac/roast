@@ -177,39 +177,3 @@ func TestDoctorReportsAndSendsSessionHeader(t *testing.T) {
 		}
 	}
 }
-
-func TestDoctorCodexEndpointDoesNotUseHTTP(t *testing.T) {
-	result := doctorEndpointCheck(t.Context(), nil, "finder", config.ResolvedRole{Protocol: "codex", BaseURL: "codex://chatgpt"})
-	if result.Status != doctorPass || !strings.Contains(result.Detail, "no HTTP model listing") {
-		t.Fatalf("result = %#v", result)
-	}
-}
-
-func TestDoctorCodexMissingCLI(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-	t.Setenv("ROAST_NO_UPDATE_CHECK", "1")
-	t.Setenv("OPENAI_API_KEY", "must-not-be-used")
-	t.Setenv("OPENAI_BASE_URL", "https://must-not-be-used.invalid")
-	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	body := "version: 1\ninference_profiles:\n  finder:\n    protocol: codex\n    model: gpt-test\n  verifier:\n    protocol: codex\n    model: gpt-test\n"
-	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	results := doctorChecks(t.Context(), configPath)
-	byName := map[string]doctorResult{}
-	for _, result := range results {
-		byName[result.Name] = result
-	}
-	for _, name := range []string{"finder", "verifier"} {
-		if result := byName[name+"-credential"]; result.Status != doctorFail {
-			t.Fatalf("missing CLI credential = %#v", result)
-		}
-		if _, ok := byName[name+"-roundtrip"]; ok {
-			t.Fatal("probed without CLI login")
-		}
-	}
-	raw, _ := json.Marshal(results)
-	if strings.Contains(string(raw), "must-not-be-used") {
-		t.Fatalf("ambient config leaked into codex: %s", raw)
-	}
-}
