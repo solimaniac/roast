@@ -55,13 +55,13 @@ func New() (*Client, error) {
 }
 
 type tokenResponse struct {
-	AccessToken       string `json:"access_token"`
-	RefreshToken      string `json:"refresh_token"`
-	IDToken           string `json:"id_token"`
-	TokenType         string `json:"token_type"`
-	ExpiresIn         int64  `json:"expires_in"`
-	Scope             string `json:"scope"`
-	EarliestRefreshAt int64  `json:"earliest_refresh_at"`
+	AccessToken       string  `json:"access_token"`
+	RefreshToken      string  `json:"refresh_token"`
+	IDToken           string  `json:"id_token"`
+	TokenType         string  `json:"token_type"`
+	ExpiresIn         int64   `json:"expires_in"`
+	Scope             *string `json:"scope,omitempty"`
+	EarliestRefreshAt int64   `json:"earliest_refresh_at"`
 }
 type oauthError struct {
 	code   string
@@ -124,6 +124,10 @@ func hasScope(scope, s string) bool {
 	return false
 }
 func (c *Client) apply(v *credential, t tokenResponse) error {
+	scope := ""
+	if t.Scope != nil {
+		scope = *t.Scope
+	}
 	if t.AccessToken == "" {
 		if t.IDToken == "" {
 			return errors.New("incomplete ChatGPT token response")
@@ -131,12 +135,12 @@ func (c *Client) apply(v *credential, t tokenResponse) error {
 	} else if !strings.EqualFold(t.TokenType, "Bearer") || t.ExpiresIn <= 0 || t.ExpiresIn > 86400 {
 		return errors.New("incomplete ChatGPT token response")
 	}
-	if hasScope(t.Scope, "chatgpt.tokens.use.direct") && (t.AccessToken == "" || t.RefreshToken == "") {
+	if hasScope(scope, "chatgpt.tokens.use.direct") && (t.AccessToken == "" || t.RefreshToken == "") {
 		return errors.New("incomplete ChatGPT plan token response")
 	}
 	v.AccessToken = t.AccessToken
 	v.RefreshToken = t.RefreshToken
-	v.Scopes = t.Scope
+	v.Scopes = scope
 	v.ExpiresAt = c.now().Add(time.Duration(t.ExpiresIn) * time.Second)
 	v.EarliestRefreshAt = t.EarliestRefreshAt
 	if t.IDToken != "" {
@@ -243,7 +247,15 @@ func (c *Client) acceptPending(ctx context.Context, v *credential) error {
 			return errors.New("refreshed ChatGPT identity changed")
 		}
 	}
-	if err := c.apply(v, p.Response); err != nil {
+	// Refresh may omit scope when the grant is unchanged. Preserve absence
+	// through the durable pending checkpoint, but honor explicit empty or
+	// reduced grants. Initial authorization never inherits saved scopes.
+	response := p.Response
+	if response.Scope == nil {
+		scope := v.Scopes
+		response.Scope = &scope
+	}
+	if err := c.apply(v, response); err != nil {
 		return err
 	}
 	v.ExpiresAt = p.ReceivedAt.Add(time.Duration(p.Response.ExpiresIn) * time.Second)

@@ -29,7 +29,7 @@ func mockSignInTransport(t *testing.T, key *rsa.PrivateKey) transportFunc {
 			id := r.Form.Get("client_id")
 			cl := claims(r.Form.Get("code")) // The fake code carries the test nonce.
 			cl["aud"] = id
-			return response(tokenResponse{AccessToken: "authorized-" + id, RefreshToken: "authorized-refresh-" + id, IDToken: signed(t, key, cl), TokenType: "Bearer", ExpiresIn: 3600, Scope: Scope}), nil
+			return response(tokenResponse{AccessToken: "authorized-" + id, RefreshToken: "authorized-refresh-" + id, IDToken: signed(t, key, cl), TokenType: "Bearer", ExpiresIn: 3600, Scope: scopeValue(Scope)}), nil
 		case jwksURL:
 			return response(jwks(key)), nil
 		case discoveryURL:
@@ -211,7 +211,7 @@ func TestSignInRejectsConcurrentCredentialChange(t *testing.T) {
 					if r.URL.String() == tokenURL {
 						_ = r.ParseForm()
 						if r.Form.Get("grant_type") == "refresh_token" {
-							return response(tokenResponse{AccessToken: "rotated-access", RefreshToken: "rotated-refresh", TokenType: "Bearer", ExpiresIn: 3600, Scope: Scope}), nil
+							return response(tokenResponse{AccessToken: "rotated-access", RefreshToken: "rotated-refresh", TokenType: "Bearer", ExpiresIn: 3600, Scope: scopeValue(Scope)}), nil
 						}
 						exchanges.Add(1)
 						close(exchanging)
