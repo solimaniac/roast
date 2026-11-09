@@ -85,7 +85,7 @@ the README whenever a public flag, environment variable, configuration field,
 artifact, data destination, or exit-code behavior changes.
 
 Pull request titles need a conventional `type:` prefix because squash merges
-turn them into release-note entries; see the README's [Contributing](README.md#contributing) section.
+turn them into release-note entries; see upstream's [Contributing](https://github.com/bluesky-social/roast#contributing) section.
 Branch protection requires the `Test and build` and `Security and licenses`
 CI checks and the PR-title check to pass, and requires a pull request to be up
 to date with `main` before it merges.

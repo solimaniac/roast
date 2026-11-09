@@ -10,7 +10,7 @@ and evaluation are not part of the `roast` command.
 ## 1. Install the current release
 
 Upgrade with the method you originally used to install Roast (see the
-README's [Install](../README.md#install) section), then confirm which binary is
+upstream [Install](https://github.com/bluesky-social/roast#install) section), then confirm which binary is
 active:
 
 ```sh
@@ -51,7 +51,7 @@ Releases before 1.1 read `$XDG_CONFIG_HOME/roast/config.yaml`, or
 `~/.config/roast/config.yaml` when `XDG_CONFIG_HOME` is unset, on every
 platform. Current releases use the operating system's user configuration
 directory by default, but also honor an explicitly set `XDG_CONFIG_HOME` on
-macOS. The README's [Config file location](../README.md#config-file-location)
+macOS. Upstream's [Config file location](https://github.com/bluesky-social/roast#config-file-location)
 section lists the paths and overrides. On macOS, set `XDG_CONFIG_HOME` to
 `$HOME/.config` to keep using the old path. Otherwise, on macOS and Windows the
 old and new paths differ, and Roast consults the old one only while installing
