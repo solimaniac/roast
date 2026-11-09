@@ -128,7 +128,7 @@ func TestRefreshSerializedAndRotated(t *testing.T) {
 		if r.Form.Get("refresh_token") != "refresh" || r.Form.Get("client_id") != c.selected || r.Form.Get("scope") != "" {
 			t.Error("bad refresh form")
 		}
-		return response(tokenResponse{AccessToken: "next-access", RefreshToken: "next-refresh", TokenType: "Bearer", ExpiresIn: 3600, Scope: Scope}), nil
+		return response(tokenResponse{AccessToken: "next-access", RefreshToken: "next-refresh", TokenType: "Bearer", ExpiresIn: 3600, Scope: scopeValue(Scope)}), nil
 	})
 	var wg sync.WaitGroup
 	for range 8 {
@@ -238,7 +238,7 @@ func TestSignInCallbackAndPKCE(t *testing.T) {
 			if base64.RawURLEncoding.EncodeToString(sum[:]) != challenge {
 				t.Error("PKCE mismatch")
 			}
-			return response(tokenResponse{AccessToken: "access", RefreshToken: "refresh", IDToken: signed(t, k, claims(nonce)), TokenType: "Bearer", Scope: Scope, ExpiresIn: 3600}), nil
+			return response(tokenResponse{AccessToken: "access", RefreshToken: "refresh", IDToken: signed(t, k, claims(nonce)), TokenType: "Bearer", Scope: scopeValue(Scope), ExpiresIn: 3600}), nil
 		default:
 			t.Fatal("unexpected destination")
 			return nil, nil
@@ -371,7 +371,7 @@ func TestRefreshPendingSurvivesJWKSFailure(t *testing.T) {
 		switch r.URL.String() {
 		case tokenURL:
 			refreshes++
-			return response(tokenResponse{AccessToken: "rotated-access", RefreshToken: "rotated-refresh", IDToken: signed(t, key, claims("")), TokenType: "Bearer", Scope: Scope, ExpiresIn: 3600}), nil
+			return response(tokenResponse{AccessToken: "rotated-access", RefreshToken: "rotated-refresh", IDToken: signed(t, key, claims("")), TokenType: "Bearer", Scope: scopeValue(Scope), ExpiresIn: 3600}), nil
 		case jwksURL:
 			fetches++
 			if fetches == 1 {
@@ -407,7 +407,7 @@ func TestPendingWrongIdentityNeverExposed(t *testing.T) {
 	v, _ := c.load(c.selected)
 	cl := claims("")
 	cl["sub"] = "different"
-	v.Pending = &pendingRefresh{Response: tokenResponse{AccessToken: "wrong-account", RefreshToken: "new-refresh", IDToken: signed(t, key, cl), TokenType: "Bearer", Scope: Scope, ExpiresIn: 3600}, ReceivedAt: time.Now()}
+	v.Pending = &pendingRefresh{Response: tokenResponse{AccessToken: "wrong-account", RefreshToken: "new-refresh", IDToken: signed(t, key, cl), TokenType: "Bearer", Scope: scopeValue(Scope), ExpiresIn: 3600}, ReceivedAt: time.Now()}
 	_ = c.save(v)
 	c.http.Transport = transportFunc(func(*http.Request) (*http.Response, error) { return response(jwks(key)), nil })
 	if token, err := c.Token(context.Background()); err == nil || token != "" {
@@ -452,7 +452,7 @@ func TestIdentityOnlyAndExplicitConsent(t *testing.T) {
 		if r.URL.String() != tokenURL {
 			t.Fatal("wrong target")
 		}
-		return response(tokenResponse{IDToken: signed(t, key, claims(nonce)), Scope: "openid profile email"}), nil
+		return response(tokenResponse{IDToken: signed(t, key, claims(nonce)), Scope: scopeValue("openid profile email")}), nil
 	})
 	run := func(enable bool) {
 		t.Helper()
@@ -532,7 +532,7 @@ func TestFailedInitialExchangePreservesPendingRegistration(t *testing.T) {
 			res.StatusCode = http.StatusBadRequest
 			return res, nil
 		}
-		return response(tokenResponse{AccessToken: "access", RefreshToken: "refresh", IDToken: signed(t, key, claims(nonce)), TokenType: "Bearer", Scope: Scope, ExpiresIn: 3600}), nil
+		return response(tokenResponse{AccessToken: "access", RefreshToken: "refresh", IDToken: signed(t, key, claims(nonce)), TokenType: "Bearer", Scope: scopeValue(Scope), ExpiresIn: 3600}), nil
 	})
 	show := func(raw string) error {
 		u, _ := url.Parse(raw)
@@ -652,7 +652,7 @@ func TestPendingRefreshDelayedPastIDExpiry(t *testing.T) {
 			cl["iat"] = received.Unix()
 			cl["exp"] = received.Add(10 * time.Minute).Unix()
 			v, _ := c.load(c.selected)
-			v.Pending = &pendingRefresh{Response: tokenResponse{AccessToken: "pending-access", RefreshToken: "pending-refresh", IDToken: signed(t, key, cl), TokenType: "Bearer", Scope: Scope, ExpiresIn: 3600}, ReceivedAt: received}
+			v.Pending = &pendingRefresh{Response: tokenResponse{AccessToken: "pending-access", RefreshToken: "pending-refresh", IDToken: signed(t, key, cl), TokenType: "Bearer", Scope: scopeValue(Scope), ExpiresIn: 3600}, ReceivedAt: received}
 			if err := c.save(v); err != nil {
 				t.Fatal(err)
 			}
@@ -667,7 +667,7 @@ func TestPendingRefreshDelayedPastIDExpiry(t *testing.T) {
 					if r.Form.Get("refresh_token") != "pending-refresh" {
 						t.Error("reused consumed refresh token")
 					}
-					return response(tokenResponse{AccessToken: "fresh-access", RefreshToken: "fresh-refresh", TokenType: "Bearer", Scope: Scope, ExpiresIn: 3600}), nil
+					return response(tokenResponse{AccessToken: "fresh-access", RefreshToken: "fresh-refresh", TokenType: "Bearer", Scope: scopeValue(Scope), ExpiresIn: 3600}), nil
 				default:
 					t.Fatal("unexpected request")
 					return nil, nil
@@ -719,7 +719,7 @@ func TestPendingRefreshRejectsInvalidReceiptOrExpiredIdentity(t *testing.T) {
 				cl["exp"] = received.Unix()
 			}
 			v, _ := c.load(c.selected)
-			v.Pending = &pendingRefresh{Response: tokenResponse{AccessToken: "pending-access", RefreshToken: "pending-refresh", IDToken: signed(t, key, cl), TokenType: "Bearer", Scope: Scope, ExpiresIn: 3600}, ReceivedAt: received}
+			v.Pending = &pendingRefresh{Response: tokenResponse{AccessToken: "pending-access", RefreshToken: "pending-refresh", IDToken: signed(t, key, cl), TokenType: "Bearer", Scope: scopeValue(Scope), ExpiresIn: 3600}, ReceivedAt: received}
 			if err := c.save(v); err != nil {
 				t.Fatal(err)
 			}
@@ -768,9 +768,9 @@ func TestRefreshRechecksExpiryAfterValidation(t *testing.T) {
 						t.Fatal("reused consumed refresh token")
 					}
 					if refreshes == 1 {
-						return response(tokenResponse{AccessToken: "short-access", RefreshToken: "rotated-refresh", IDToken: signed(t, key, cl), TokenType: "Bearer", ExpiresIn: 1, Scope: Scope}), nil
+						return response(tokenResponse{AccessToken: "short-access", RefreshToken: "rotated-refresh", IDToken: signed(t, key, cl), TokenType: "Bearer", ExpiresIn: 1, Scope: scopeValue(Scope)}), nil
 					}
-					return response(tokenResponse{AccessToken: "fresh-access", RefreshToken: "fresh-refresh", TokenType: "Bearer", ExpiresIn: 3600, Scope: Scope}), nil
+					return response(tokenResponse{AccessToken: "fresh-access", RefreshToken: "fresh-refresh", TokenType: "Bearer", ExpiresIn: 3600, Scope: scopeValue(Scope)}), nil
 				case jwksURL:
 					now = received.Add(delay)
 					return response(jwks(key)), nil
