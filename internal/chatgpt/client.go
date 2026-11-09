@@ -55,13 +55,13 @@ func New() (*Client, error) {
 }
 
 type tokenResponse struct {
-	AccessToken       string  `json:"access_token"`
-	RefreshToken      string  `json:"refresh_token"`
-	IDToken           string  `json:"id_token"`
-	TokenType         string  `json:"token_type"`
-	ExpiresIn         int64   `json:"expires_in"`
-	Scope             *string `json:"scope,omitempty"`
-	EarliestRefreshAt int64   `json:"earliest_refresh_at"`
+	AccessToken       string           `json:"access_token"`
+	RefreshToken      string           `json:"refresh_token"`
+	IDToken           string           `json:"id_token"`
+	TokenType         string           `json:"token_type"`
+	ExpiresIn         int64            `json:"expires_in"`
+	Scope             *string          `json:"scope,omitempty"`
+	EarliestRefreshAt refreshTimestamp `json:"earliest_refresh_at"`
 }
 type oauthError struct {
 	code   string
@@ -142,7 +142,7 @@ func (c *Client) apply(v *credential, t tokenResponse) error {
 	v.RefreshToken = t.RefreshToken
 	v.Scopes = scope
 	v.ExpiresAt = c.now().Add(time.Duration(t.ExpiresIn) * time.Second)
-	v.EarliestRefreshAt = t.EarliestRefreshAt
+	v.EarliestRefreshAt = int64(t.EarliestRefreshAt)
 	if t.IDToken != "" {
 		v.IDToken = t.IDToken
 	}
