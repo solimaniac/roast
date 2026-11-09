@@ -248,7 +248,7 @@ func (c *Client) signIn(ctx context.Context, clientID string, consent bool, show
 				http.Error(w, "Authorization already received", 400)
 				return
 			}
-			_, _ = w.Write([]byte("Authorization received. Return to Roast to check the result."))
+			writeCallbackComplete(w)
 		})}
 		serveDone := serveCallback(server, listener)
 		defer closeCallback(server)
