@@ -64,8 +64,9 @@ type tokenResponse struct {
 	EarliestRefreshAt refreshTimestamp `json:"earliest_refresh_at"`
 }
 type oauthError struct {
-	code   string
-	status int
+	code      string
+	status    int
+	requestID string
 }
 
 func (e *oauthError) Is(target error) bool {
@@ -75,7 +76,14 @@ func (e *oauthError) Is(target error) bool {
 	return target == ErrAuth
 }
 func (e *oauthError) Error() string {
-	return fmt.Sprintf("ChatGPT OAuth request failed (HTTP %d); sign in again if access was revoked", e.status)
+	message := fmt.Sprintf("ChatGPT OAuth request failed (HTTP %d, %s)", e.status, safeOAuthCategory(e.code))
+	if requestID := safeOAuthRequestID(e.requestID); requestID != "" {
+		message += "; request ID " + requestID
+	}
+	if errors.Is(e, ErrNetwork) {
+		return message + "; retry later"
+	}
+	return message
 }
 func (c *Client) request(ctx context.Context, method, target string, form url.Values, bearer string, out any) error {
 	var body io.Reader
@@ -102,10 +110,16 @@ func (c *Client) request(ctx context.Context, method, target string, form url.Va
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		var v struct {
-			Error string `json:"error"`
+			Error json.RawMessage `json:"error"`
 		}
-		_ = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&v)
-		return &oauthError{v.Error, resp.StatusCode}
+		if json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&v) != nil {
+			v.Error = nil
+		}
+		requestID := ""
+		if values := resp.Header.Values("X-Request-Id"); len(values) == 1 {
+			requestID = safeOAuthRequestID(values[0])
+		}
+		return &oauthError{code: oauthResponseCategory(v.Error), status: resp.StatusCode, requestID: requestID}
 	}
 	if out == nil {
 		return nil
@@ -183,7 +197,7 @@ func (c *Client) Token(ctx context.Context) (string, error) {
 		e = c.request(ctx, http.MethodPost, tokenURL, url.Values{"grant_type": {"refresh_token"}, "client_id": {v.ClientID}, "refresh_token": {v.RefreshToken}, "resource": {APIBaseURL}}, "", &t)
 		if e != nil {
 			var oe *oauthError
-			if errors.As(e, &oe) {
+			if errors.As(e, &oe) && !errors.Is(e, ErrNetwork) {
 				switch oe.code {
 				case "invalid_grant", "invalid_refresh_token", "token_expired", "refresh_token_expired", "refresh_token_invalidated", "refresh_token_reused":
 					v.AccessToken = ""

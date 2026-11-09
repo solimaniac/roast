@@ -230,7 +230,7 @@ func (c *Client) signIn(ctx context.Context, clientID string, consent bool, show
 				v := callback{code: values.Get("code"), id: values.Get("client_id")}
 				switch {
 				case values.Get("error") != "":
-					v.err = errors.New("ChatGPT authorization was declined or failed")
+					v.err = fmt.Errorf("ChatGPT authorization failed (%s)", safeOAuthCategory(values.Get("error")))
 				case len(values["code"]) != 1 || v.code == "" || len(values["client_id"]) > 1:
 					v.err = errors.New("incomplete ChatGPT callback")
 				case clientID == "" && !validIssuedClientID(v.id):

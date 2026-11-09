@@ -698,7 +698,7 @@ func TestSelectionWritePathsUseFreshRevisions(t *testing.T) {
 						// Decline after initialization to isolate its revision write.
 						cb.RawQuery = url.Values{"state": {auth.Get("state")}, "error": {"access_denied"}}.Encode()
 						callbackGET(t, cb, http.StatusOK)
-						if declined := awaitMockSignIn(t, done); declined == nil || !strings.Contains(declined.Error(), "authorization was declined") {
+						if declined := awaitMockSignIn(t, done); declined == nil || declined.Error() != "ChatGPT authorization failed (access_denied)" {
 							t.Fatalf("expected declined sign-in: %v", declined)
 						}
 					}
