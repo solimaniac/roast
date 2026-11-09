@@ -35,6 +35,12 @@ func startAsyncSignIn(t *testing.T, c *Client, ctx context.Context) (*url.URL, <
 
 func callbackGET(t *testing.T, cb *url.URL, status int) string {
 	t.Helper()
+	_, body := callbackGETResponse(t, cb, status)
+	return body
+}
+
+func callbackGETResponse(t *testing.T, cb *url.URL, status int) (http.Header, string) {
+	t.Helper()
 	client := &http.Client{Timeout: 3 * time.Second}
 	res, err := client.Get(cb.String())
 	if err != nil {
@@ -48,7 +54,10 @@ func callbackGET(t *testing.T, cb *url.URL, status int) string {
 	if res.StatusCode != status {
 		t.Fatalf("callback status %d, want %d", res.StatusCode, status)
 	}
-	return string(body)
+	if status == http.StatusOK {
+		assertCallbackCompletePage(t, res.Header, string(body))
+	}
+	return res.Header, string(body)
 }
 
 func TestAsyncCallbackCompleteResponseOnFailure(t *testing.T) {
@@ -62,14 +71,27 @@ func TestAsyncCallbackCompleteResponseOnFailure(t *testing.T) {
 				c.SetSignInDiagnostics(diagnostics)
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				cb, done := startAsyncSignIn(t, c, ctx)
+				q := cb.Query()
+				q.Set("error_description", `<script>alert("private-description-marker")</script>`)
+				q.Set("error_uri", "https://private-error-uri.invalid/")
+				q.Set("user_content", "private-user-content-marker")
 				if kind == "callback" {
-					q := cb.Query()
+					q.Del("code")
 					q.Set("error", "private-error-marker")
-					cb.RawQuery = q.Encode()
 				}
-				body := callbackGET(t, cb, 200)
-				if body != "Authorization received. Return to Roast to check the result." {
-					t.Fatal("unexpected response body")
+				cb.RawQuery = q.Encode()
+				header, body := callbackGETResponse(t, cb, 200)
+				var response bytes.Buffer
+				response.WriteString(body)
+				if err := header.Write(&response); err != nil {
+					t.Fatal(err)
+				}
+				for _, values := range q {
+					for _, value := range values {
+						if strings.Contains(response.String(), value) {
+							t.Fatal("callback response exposed request data")
+						}
+					}
 				}
 				select {
 				case err := <-done:
