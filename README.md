@@ -245,6 +245,11 @@ run on the same host: the redirect must use the exact issued
 `http://127.0.0.1:PORT/auth/callback` URL, including its port and path. A browser
 on another host cannot reach that loopback listener. If no callback arrives,
 diagnostics alone do not establish why the authorization redirect failed.
+OAuth failures include only a fixed error category, HTTP status when available,
+and a recognized `x-request-id`; provider descriptions and callback query values
+are never included. Accepted callback pages remove the query from browser
+history with a fixed, CSP-hashed script, for both successful and error callbacks.
+The page confirms receipt, not successful token exchange.
 
 Roast stores credentials separately under the operating-system user config
 directory's `roast/chatgpt/` subdirectory (for example,
@@ -259,6 +264,11 @@ serialize rotating-token refreshes across processes. A pending rotated token
 response is protected on disk before fallible validation, so a temporary JWKS
 failure does not lose the replacement refresh token. Tokens are never placed
 in Roast's YAML, run metadata, URLs printed for returning sign-in, or logs.
+Refresh responses that omit `scope` or return `null` retain the saved grant;
+explicit empty or reduced scopes replace it. Optional `earliest_refresh_at`
+metadata accepts Unix seconds, numeric strings, or RFC3339 date strings. Invalid
+scheduling hints fall back to the normal expiry-based policy without discarding
+rotated credentials. Expired access tokens are never used while waiting to refresh.
 
 `roast chatgpt signout [CLIENT_ID]` clears local tokens and attempts server-side
 revocation, retaining the registration identity for later sign-in. If revocation
