@@ -124,6 +124,62 @@ func TestAsyncCallbackCompleteResponseOnFailure(t *testing.T) {
 	}
 }
 
+func TestAsyncCallbackOAuthErrorCategories(t *testing.T) {
+	for _, tc := range []struct{ name, code, category string }{
+		{"denied", "access_denied", "access_denied"},
+		{"server", "server_error", "server_error"},
+		{"unknown", "private-error-marker", "oauth_error"},
+		{"injected", "access_denied\nprivate-error-marker", "oauth_error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := testClient(t)
+			seed(t, c, time.Now().Add(time.Hour))
+			c.http.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
+				t.Error("OAuth error callback started a token exchange")
+				return nil, errors.New("unexpected exchange")
+			})
+			diagnostics := newSignInDiagnosticLog()
+			c.SetSignInDiagnostics(diagnostics)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			cb, done := startAsyncSignIn(t, c, ctx)
+			q := cb.Query()
+			q.Set("error", tc.code)
+			q.Set("error_description", "private-description-marker")
+			q.Set("error_uri", "https://private-error-uri.invalid/")
+			q.Set("request_id", "req_private_callback_marker")
+			cb.RawQuery = q.Encode()
+			header, body := callbackGETResponse(t, cb, http.StatusOK)
+			var err error
+			select {
+			case err = <-done:
+			case <-ctx.Done():
+				t.Fatal("sign-in stuck after OAuth error callback")
+			}
+			if err == nil || err.Error() != "ChatGPT authorization failed ("+tc.category+")" {
+				t.Fatal("callback did not return the fixed OAuth error category")
+			}
+			var output bytes.Buffer
+			output.WriteString(err.Error())
+			output.WriteString(body)
+			output.WriteString(diagnostics.String())
+			if err := header.Write(&output); err != nil {
+				t.Fatal(err)
+			}
+			for key, values := range q {
+				if key == "error" && tc.code == tc.category {
+					continue // Only a recognized fixed error category may be shown.
+				}
+				for _, value := range values {
+					if strings.Contains(output.String(), value) {
+						t.Fatal("OAuth error callback exposed request data")
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestAsyncCallbackRejectionsAndDuplicate(t *testing.T) {
 	c := testClient(t)
 	seed(t, c, time.Now().Add(time.Hour))
