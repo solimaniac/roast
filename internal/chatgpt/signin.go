@@ -357,7 +357,7 @@ func (c *Client) signIn(ctx context.Context, clientID string, consent bool, show
 			}); e != nil {
 				return e
 			}
-			if !hasScope(v.Scopes, "chatgpt.tokens.use.direct") || !hasScope(v.Scopes, "resource.invoke") {
+			if !hasPlanScope(v.Scopes) {
 				return fmt.Errorf("signed in, but ChatGPT plan usage is disabled; enable with roast chatgpt signin --account %s --enable-plan, or configure another billing path", cb.id)
 			}
 			return nil

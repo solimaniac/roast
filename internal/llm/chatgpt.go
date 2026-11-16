@@ -18,7 +18,7 @@ import (
 	"github.com/bluesky-social/roast/internal/chatgpt"
 )
 
-const chatGPTBaseURL = "https://api.openai.com/v1"
+const chatGPTBaseURL = chatgpt.APIBaseURL
 const chatGPTToolNamespace = "roast"
 
 func newChatGPTClient(ctx context.Context, cfg ClientConfig) (Client, error) {

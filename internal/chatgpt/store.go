@@ -218,7 +218,7 @@ func (c *Client) Status(ctx context.Context) ([]Account, error) {
 			a := v.Account
 			a.Active = id == i.Active
 			a.SignedIn = v.AccessToken != "" || v.IDToken != ""
-			a.PlanEnabled = hasScope(v.Scopes, "chatgpt.tokens.use.direct") && hasScope(v.Scopes, "resource.invoke")
+			a.PlanEnabled = hasPlanScope(v.Scopes)
 			out = append(out, a)
 		}
 		return nil

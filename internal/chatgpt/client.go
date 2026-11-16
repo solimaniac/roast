@@ -133,6 +133,10 @@ func hasScope(scope, s string) bool {
 	}
 	return false
 }
+func hasPlanScope(scope string) bool {
+	return hasScope(scope, "chatgpt.tokens.use.direct") && hasScope(scope, "resource.invoke")
+}
+
 func (c *Client) apply(v *credential, t tokenResponse) error {
 	scope := ""
 	if t.Scope != nil {
@@ -164,9 +168,6 @@ func (c *Client) Token(ctx context.Context) (string, error) {
 	}
 	var token string
 	err := c.locked(ctx, func() error {
-		if c.selected == "" {
-			return errors.New("no ChatGPT account selected; run roast chatgpt signin")
-		}
 		v, e := c.load(c.selected)
 		if e != nil {
 			return e
@@ -179,7 +180,7 @@ func (c *Client) Token(ctx context.Context) (string, error) {
 		if v.AccessToken == "" {
 			return errors.New("ChatGPT account is signed out; run roast chatgpt signin --account CLIENT_ID")
 		}
-		if !hasScope(v.Scopes, "chatgpt.tokens.use.direct") || !hasScope(v.Scopes, "resource.invoke") {
+		if !hasPlanScope(v.Scopes) {
 			return errors.New("ChatGPT plan usage scope is missing; sign in again")
 		}
 		if c.now().Before(v.ExpiresAt.Add(-time.Minute)) || c.now().Unix() < v.EarliestRefreshAt {
@@ -216,7 +217,7 @@ func (c *Client) Token(ctx context.Context) (string, error) {
 			return e
 		}
 
-		if !hasScope(v.Scopes, "chatgpt.tokens.use.direct") || !hasScope(v.Scopes, "resource.invoke") {
+		if !hasPlanScope(v.Scopes) {
 			return errors.New("ChatGPT plan usage permission was removed; enable it explicitly before inference")
 		}
 		// Validation may outlast a short-lived access token. Keep the rotated
