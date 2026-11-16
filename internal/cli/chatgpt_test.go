@@ -2,7 +2,6 @@ package cli
 
 import (
 	"bytes"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -22,9 +21,6 @@ func TestChatGPTCommands(t *testing.T) {
 	}
 }
 func TestChatGPTEmptyStatus(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("direct ChatGPT auth is not supported on Windows")
-	}
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("HOME", dir)

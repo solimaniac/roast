@@ -14,3 +14,10 @@ func tryLock(f *os.File) (bool, error) {
 	}
 	return err == nil, err
 }
+
+func unlockFile(f *os.File) {
+	// Closing a Windows handle releases locks asynchronously. Explicit unlock
+	// lets another goroutine acquire the store immediately after this returns.
+	var o windows.Overlapped
+	_ = windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, &o)
+}

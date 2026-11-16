@@ -42,8 +42,12 @@ registration. Roast owns these credentials under its private config directory;
 it never reads Codex credentials. Atomic owner-only files, OS-released locks,
 and protected pending refresh responses handle rotation and interruption.
 Returning sign-in does not force consent unless the user requests `--enable-plan`.
-Direct auth currently rejects Windows before credential access because native
-ACL protection is not implemented. VM credential transfer is manual and must
+On Windows, credential directories and files are created with a protected DACL
+granting access only to the current user. Reads and locks reject storage owned
+by another user, unprotected DACLs, ACLs granting other principals access, and reparse points.
+Credential replacements flush file contents and use a write-through move.
+Existing insecure storage is rejected rather than silently changing its ACL.
+VM credential transfer is manual and must
 preserve the target host identity; see the README and official VM guide.
 
 The preview rejects `max_output_tokens`: output estimates and shared token

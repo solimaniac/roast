@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 )
@@ -38,9 +37,6 @@ type Client struct {
 
 // New opens Roast's own registration store under the operating-system config directory.
 func New() (*Client, error) {
-	if runtime.GOOS == "windows" {
-		return nil, errors.New("direct ChatGPT authentication is currently supported only on Linux and macOS; Windows requires protected credential ACL support. Use another Roast backend on Windows")
-	}
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return nil, err

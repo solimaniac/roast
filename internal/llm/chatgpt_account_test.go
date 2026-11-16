@@ -5,14 +5,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
+
+	"github.com/bluesky-social/roast/internal/chatgpt"
 )
 
 func TestChatGPTAccountSnapshotKeepsInitializationFailure(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("direct ChatGPT auth is not supported on Windows")
-	}
 	root := t.TempDir()
 	for _, name := range []string{"HOME", "APPDATA", "XDG_CONFIG_HOME"} {
 		t.Setenv(name, root)
@@ -22,7 +20,11 @@ func TestChatGPTAccountSnapshotKeepsInitializationFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := filepath.Join(configDir, "roast", "chatgpt")
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	initial, err := chatgpt.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := initial.PrepareHost(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	index := filepath.Join(dir, "accounts.json")

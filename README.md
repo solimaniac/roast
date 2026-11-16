@@ -5,7 +5,7 @@ using your ChatGPT plan through OpenAI's public API, with its own OAuth sign-in.
 It does not use the Codex CLI or Codex credentials.
 
 **Experimental:** live end-to-end verification is incomplete. Not production-ready.
-Requires Linux or macOS and Go 1.27.3+.
+Requires Linux, macOS, or Windows and Go 1.27.3+.
 
 ## Install
 
@@ -16,6 +16,14 @@ go build -o roast ./cmd/roast
 export PATH="$PWD:$PATH"
 roast chatgpt signin
 roast chatgpt models
+```
+
+On Windows PowerShell, build and run with:
+
+```powershell
+go build -o roast.exe ./cmd/roast
+.\roast.exe chatgpt signin
+.\roast.exe chatgpt models
 ```
 
 Open the sign-in link in a browser on the same computer. Approval grants ongoing

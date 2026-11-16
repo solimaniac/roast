@@ -77,26 +77,13 @@ func (c *Client) path(id string) string {
 	h := sha256.Sum256([]byte(id))
 	return filepath.Join(c.dir, hex.EncodeToString(h[:])+".json")
 }
-func secureDir(dir string) error {
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return err
-	}
-	st, err := os.Lstat(dir)
-	if err != nil {
-		return err
-	}
-	if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 || st.Mode().Perm()&0077 != 0 {
-		return errors.New("ChatGPT credential directory must be a private directory (0700)")
-	}
-	return nil
-}
 func readJSON(path string, v any) error {
 	st, err := os.Lstat(path)
 	if err != nil {
 		return err
 	}
-	if !st.Mode().IsRegular() || st.Mode().Perm()&0077 != 0 {
-		return errors.New("ChatGPT credential file must be a private regular file (0600)")
+	if err := checkPrivate(path, st, false); err != nil {
+		return err
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -112,7 +99,7 @@ func writeJSON(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(filepath.Dir(path), ".credentials-*")
+	f, err := privateTemp(filepath.Dir(path))
 	if err != nil {
 		return err
 	}
@@ -126,17 +113,7 @@ func writeJSON(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	if err = os.Rename(f.Name(), path); err != nil {
-		return err
-	}
-	// Persist the directory entry as well as file contents before considering a
-	// rotated refresh token durable (direct auth is supported on Unix only).
-	dir, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	return dir.Sync()
+	return commitPrivate(f.Name(), path)
 }
 func (c *Client) locked(ctx context.Context, fn func() error) error {
 	return c.lockedFile(ctx, "session", fn)
@@ -161,10 +138,14 @@ func (c *Client) lockedFile(ctx context.Context, name string, fn func() error) e
 	// Kernel-owned advisory locks are released even if Roast is killed. Never
 	// unlink this file: doing so would allow separate processes to lock two inodes.
 	lock := filepath.Join(c.dir, name+".lock")
-	if st, err := os.Lstat(lock); err == nil && (!st.Mode().IsRegular() || st.Mode().Perm()&0077 != 0) {
-		return errors.New("ChatGPT lock must be a private regular file")
+	if st, err := os.Lstat(lock); err == nil {
+		if err := checkPrivate(lock, st, false); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
-	f, err := os.OpenFile(lock, os.O_CREATE|os.O_RDWR, 0600)
+	f, err := privateLock(lock)
 	if err != nil {
 		return err
 	}
@@ -189,6 +170,7 @@ func (c *Client) lockedFile(ctx context.Context, name string, fn func() error) e
 		}
 	}
 
+	defer unlockFile(f)
 	return fn()
 }
 func (c *Client) loadIndex() (index, error) {

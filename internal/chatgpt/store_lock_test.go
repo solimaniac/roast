@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -24,6 +25,9 @@ func TestStoreAndAuthorizationLocksRejectSymlinks(t *testing.T) {
 				t.Fatal(err)
 			}
 			if err := os.Symlink(target, filepath.Join(c.dir, name+".lock")); err != nil {
+				if runtime.GOOS == "windows" && errors.Is(err, os.ErrPermission) {
+					t.Skip("creating symlinks requires Windows Developer Mode or privilege")
+				}
 				t.Fatal(err)
 			}
 			entered := false

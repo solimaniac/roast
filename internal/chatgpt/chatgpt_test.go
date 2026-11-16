@@ -32,11 +32,8 @@ func response(v any) *http.Response {
 }
 func testClient(t *testing.T) *Client {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("direct ChatGPT auth requires Windows protected ACL implementation")
-	}
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0700); err != nil {
+	dir := filepath.Join(t.TempDir(), "credentials")
+	if err := secureDir(dir); err != nil {
 		t.Fatal(err)
 	}
 	return &Client{dir: dir, now: time.Now, http: &http.Client{Transport: transportFunc(func(*http.Request) (*http.Response, error) {
@@ -147,9 +144,12 @@ func TestRefreshSerializedAndRotated(t *testing.T) {
 	if e != nil || v.RefreshToken != "next-refresh" {
 		t.Fatal("rotation not saved")
 	}
-	st, _ := os.Stat(c.path(c.selected))
-	if st.Mode().Perm() != 0600 {
-		t.Fatal("credential file is not 0600")
+	st, err := os.Stat(c.path(c.selected))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkPrivate(c.path(c.selected), st, false); err != nil {
+		t.Fatal(err)
 	}
 }
 func TestEarliestRefresh(t *testing.T) {
@@ -200,14 +200,16 @@ func TestNetworkErrorDoesNotClearTokens(t *testing.T) {
 func TestPrivateFilesAndLockCancellation(t *testing.T) {
 	c := testClient(t)
 	seed(t, c, time.Now().Add(time.Hour))
-	if e := os.Chmod(c.path(c.selected), 0644); e != nil {
-		t.Fatal(e)
+	if runtime.GOOS != "windows" {
+		if e := os.Chmod(c.path(c.selected), 0644); e != nil {
+			t.Fatal(e)
+		}
+		if _, e := c.Token(context.Background()); e == nil {
+			t.Fatal("accepted public credential")
+		}
+		_ = os.Chmod(c.path(c.selected), 0600)
 	}
-	if _, e := c.Token(context.Background()); e == nil {
-		t.Fatal("accepted public credential")
-	}
-	_ = os.Chmod(c.path(c.selected), 0600)
-	lock, err := os.OpenFile(filepath.Join(c.dir, "session.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	lock, err := privateLock(filepath.Join(c.dir, "session.lock"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,12 +344,6 @@ func TestNewDoesNotCreateCredentials(t *testing.T) {
 	t.Setenv("HOME", dir)
 	t.Setenv("APPDATA", dir)
 	c, err := New()
-	if runtime.GOOS == "windows" {
-		if err == nil || !strings.Contains(err.Error(), "ACL") {
-			t.Fatal("missing Windows safety error")
-		}
-		return
-	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -568,7 +564,7 @@ func TestFailedInitialExchangePreservesPendingRegistration(t *testing.T) {
 		t.Fatal("failed registration displaced active account")
 	}
 	st, err := os.Stat(c.path("oaiapp_test"))
-	if err != nil || st.Mode().Perm() != 0600 {
+	if err != nil || checkPrivate(c.path("oaiapp_test"), st, false) != nil {
 		t.Fatal("pending record is not owner-only")
 	}
 	if err := c.Select(context.Background(), "oaiapp_test"); err == nil {

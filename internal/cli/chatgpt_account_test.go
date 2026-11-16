@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -36,15 +35,16 @@ func mockAccountTransport(t *testing.T, transport accountRoundTripper) {
 
 func accountFixture(t *testing.T) (configPath, accountDir string, selectAccount func(string) error) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("direct ChatGPT auth is not supported on Windows")
-	}
 	configPath = isolateUserConfig(t)
 	t.Setenv("ROAST_NO_UPDATE_CHECK", "1")
 	t.Setenv("ROAST_NO_HOOK", "1")
 	t.Setenv("ROAST_RECORD_DIR", t.TempDir())
 	accountDir = filepath.Join(filepath.Dir(configPath), "chatgpt")
-	if err := os.MkdirAll(accountDir, 0700); err != nil {
+	initial, err := chatgpt.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := initial.PrepareHost(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	write := func(name string, value any) {
@@ -55,6 +55,7 @@ func accountFixture(t *testing.T) (configPath, accountDir string, selectAccount 
 		if err := os.WriteFile(filepath.Join(accountDir, name), data, 0600); err != nil {
 			t.Fatal(err)
 		}
+		protectAccountFixture(t, filepath.Join(accountDir, name))
 	}
 	write("accounts.json", map[string]any{"active": "account-a", "clients": []string{"account-a", "account-b"}})
 	for _, account := range []string{"account-a", "account-b"} {
