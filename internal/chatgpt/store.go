@@ -1,5 +1,3 @@
-// Package chatgpt owns Roast's independent Sign in with ChatGPT registrations.
-// It never reads Codex credentials or accepts endpoint or token overrides.
 package chatgpt
 
 import (
@@ -8,12 +6,13 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/bluesky-social/roast/internal/chatgpt/internal/oauth"
+	"github.com/bluesky-social/roast/internal/chatgpt/internal/storage"
 )
 
 type Account struct {
@@ -26,9 +25,11 @@ type Account struct {
 	PlanEnabled         bool      `json:"plan_enabled"`
 	ExpiresAt           time.Time `json:"expires_at"`
 }
+
+// pendingRefresh retains a rotated response until identity validation succeeds.
 type pendingRefresh struct {
-	Response   tokenResponse `json:"response"`
-	ReceivedAt time.Time     `json:"received_at"`
+	Response   oauth.TokenResponse `json:"response"`
+	ReceivedAt time.Time           `json:"received_at"`
 }
 
 type credential struct {
@@ -41,6 +42,7 @@ type credential struct {
 	Scopes            string `json:"scope,omitempty"`
 	EarliestRefreshAt int64  `json:"earliest_refresh_at,omitempty"`
 }
+
 type index struct {
 	HostID           string   `json:"host_id"`
 	Active           string   `json:"active"`
@@ -77,46 +79,9 @@ func (c *Client) path(id string) string {
 	h := sha256.Sum256([]byte(id))
 	return filepath.Join(c.dir, hex.EncodeToString(h[:])+".json")
 }
-func readJSON(path string, v any) error {
-	st, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	if err := checkPrivate(path, st, false); err != nil {
-		return err
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	if json.Unmarshal(b, v) != nil {
-		return errors.New("invalid ChatGPT credential file")
-	}
-	return nil
-}
-func writeJSON(path string, v any) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	f, err := privateTemp(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	if _, err = f.Write(b); err == nil {
-		err = f.Sync()
-	}
-	if closeErr := f.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return err
-	}
-	return commitPrivate(f.Name(), path)
-}
+
 func (c *Client) locked(ctx context.Context, fn func() error) error {
-	return c.lockedFile(ctx, "session", fn)
+	return storage.WithLock(ctx, c.dir, "session", fn)
 }
 
 // Authorization waits never own the session lock. Separate registration locks
@@ -128,63 +93,23 @@ func (c *Client) authorizationLocked(ctx context.Context, id string, fn func() e
 		h := sha256.Sum256([]byte(id))
 		name = "authorization-" + hex.EncodeToString(h[:])
 	}
-	return c.lockedFile(ctx, name, fn)
+	return storage.WithLock(ctx, c.dir, name, fn)
 }
 
-func (c *Client) lockedFile(ctx context.Context, name string, fn func() error) error {
-	if err := secureDir(c.dir); err != nil {
-		return err
-	}
-	// Kernel-owned advisory locks are released even if Roast is killed. Never
-	// unlink this file: doing so would allow separate processes to lock two inodes.
-	lock := filepath.Join(c.dir, name+".lock")
-	if st, err := os.Lstat(lock); err == nil {
-		if err := checkPrivate(lock, st, false); err != nil {
-			return err
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	f, err := privateLock(lock)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	for {
-		if err := waitCtx.Err(); err != nil {
-			return fmt.Errorf("waiting for ChatGPT lock: %w", err)
-		}
-		ok, err := tryLock(f)
-		if err != nil {
-			return err
-		}
-		if ok {
-			break
-		}
-		select {
-		case <-waitCtx.Done():
-			return fmt.Errorf("waiting for ChatGPT lock: %w", waitCtx.Err())
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
-
-	defer unlockFile(f)
-	return fn()
-}
 func (c *Client) loadIndex() (index, error) {
 	var i index
-	err := readJSON(filepath.Join(c.dir, "accounts.json"), &i)
+	err := storage.ReadJSON(filepath.Join(c.dir, "accounts.json"), &i)
 	if errors.Is(err, os.ErrNotExist) {
 		err = nil
 	}
 	return i, err
 }
-func (c *Client) saveIndex(i index) error { return writeJSON(filepath.Join(c.dir, "accounts.json"), i) }
+func (c *Client) saveIndex(i index) error {
+	return storage.WriteJSON(filepath.Join(c.dir, "accounts.json"), i)
+}
 func (c *Client) load(id string) (credential, error) {
 	var v credential
-	err := readJSON(c.path(id), &v)
+	err := storage.ReadJSON(c.path(id), &v)
 	if err == nil && v.ClientID != id {
 		return v, errors.New("ChatGPT registration identity mismatch")
 	}
@@ -198,66 +123,5 @@ func (c *Client) save(v credential) error {
 		return err
 	}
 	v.Generation = generation
-	return writeJSON(c.path(v.ClientID), v)
-}
-func (c *Client) Status(ctx context.Context) ([]Account, error) {
-	if _, err := os.Lstat(c.dir); errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	var out []Account
-	err := c.locked(ctx, func() error {
-		i, e := c.loadIndex()
-		if e != nil {
-			return e
-		}
-		for _, id := range i.Clients {
-			v, e := c.load(id)
-			if e != nil {
-				return e
-			}
-			a := v.Account
-			a.Active = id == i.Active
-			a.SignedIn = v.AccessToken != "" || v.IDToken != ""
-			a.PlanEnabled = hasPlanScope(v.Scopes)
-			out = append(out, a)
-		}
-		return nil
-	})
-	return out, err
-}
-func (c *Client) Select(ctx context.Context, id string) error {
-	return c.locked(ctx, func() error {
-		i, e := c.loadIndex()
-		if e != nil {
-			return e
-		}
-		v, e := c.load(id)
-		if e != nil {
-			return e
-		}
-		if v.AccessToken == "" && v.IDToken == "" {
-			return errors.New("account is signed out; run roast chatgpt signin --account CLIENT_ID")
-		}
-		if e = i.setActive(id); e != nil {
-			return e
-		}
-		return c.saveIndex(i)
-	})
-}
-
-// PrepareHost explicitly initializes only this runtime's stable host identity.
-// It creates no OAuth client registration or token.
-func (c *Client) PrepareHost(ctx context.Context) (hostID, dir string, err error) {
-	err = c.locked(ctx, func() error {
-		i, e := c.loadIndex()
-		if e != nil {
-			return e
-		}
-		if e = c.ensureHost(&i); e != nil {
-			return e
-		}
-		hostID = i.HostID
-		return nil
-	})
-	return hostID, c.dir, err
+	return storage.WriteJSON(c.path(v.ClientID), v)
 }

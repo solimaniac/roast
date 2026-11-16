@@ -1,6 +1,6 @@
 //go:build !windows
 
-package chatgpt
+package storage
 
 import (
 	"errors"
@@ -16,7 +16,7 @@ func checkPrivate(_ string, st os.FileInfo, directory bool) error {
 	return nil
 }
 
-func secureDir(dir string) error {
+func EnsureDir(dir string) error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}

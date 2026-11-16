@@ -1,4 +1,4 @@
-package chatgpt
+package storage
 
 import (
 	"context"
@@ -28,16 +28,16 @@ func setTestDACL(t *testing.T, path, sddl string) {
 
 func TestWindowsPrivateStorageAndReplacement(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "credentials")
-	if err := secureDir(dir); err != nil {
+	if err := EnsureDir(dir); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "tokens.json")
 	for _, token := range []string{"first", "rotated"} {
-		if err := writeJSON(path, map[string]string{"token": token}); err != nil {
+		if err := WriteJSON(path, map[string]string{"token": token}); err != nil {
 			t.Fatal(err)
 		}
 		var saved map[string]string
-		if err := readJSON(path, &saved); err != nil || saved["token"] != token {
+		if err := ReadJSON(path, &saved); err != nil || saved["token"] != token {
 			t.Fatalf("replacement not readable: %v", err)
 		}
 	}
@@ -74,11 +74,11 @@ func TestWindowsRejectsInsecureStorage(t *testing.T) {
 	}
 	for _, object := range []string{"directory", "credential", "lock"} {
 		t.Run(object, func(t *testing.T) {
-			c := testClient(t)
-			path := c.dir
+			dir := testStorageDir(t)
+			path := dir
 			if object != "directory" {
-				path = filepath.Join(c.dir, "session.lock")
-				if err := writeJSON(path, map[string]string{"token": "synthetic"}); err != nil {
+				path = filepath.Join(dir, "session.lock")
+				if err := WriteJSON(path, map[string]string{"token": "synthetic"}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -87,14 +87,14 @@ func TestWindowsRejectsInsecureStorage(t *testing.T) {
 			switch object {
 			case "credential":
 				var v any
-				err = readJSON(path, &v)
+				err = ReadJSON(path, &v)
 			case "lock":
-				err = c.locked(context.Background(), func() error {
+				err = WithLock(context.Background(), dir, "session", func() error {
 					t.Fatal("entered lock with public ACL")
 					return nil
 				})
 			case "directory":
-				err = secureDir(path)
+				err = EnsureDir(path)
 			}
 			if !errors.Is(err, errPrivateACL) {
 				t.Fatalf("accepted public %s: %v", object, err)
@@ -125,9 +125,9 @@ func TestWindowsRejectsNullOrForeignDACL(t *testing.T) {
 }
 
 func TestWindowsReplacementRetriesSharingViolation(t *testing.T) {
-	c := testClient(t)
-	path := filepath.Join(c.dir, "accounts.json")
-	if err := writeJSON(path, "old"); err != nil {
+	dir := testStorageDir(t)
+	path := filepath.Join(dir, "accounts.json")
+	if err := WriteJSON(path, "old"); err != nil {
 		t.Fatal(err)
 	}
 	// Match the os.ReadFile handle used by New's unlocked loadIndex.
@@ -137,7 +137,7 @@ func TestWindowsReplacementRetriesSharingViolation(t *testing.T) {
 	}
 	defer reader.Close()
 	done := make(chan error, 1)
-	go func() { done <- writeJSON(path, "new") }()
+	go func() { done <- WriteJSON(path, "new") }()
 	select {
 	case err := <-done:
 		t.Fatalf("replacement returned before the reader closed: %v", err)
@@ -155,15 +155,15 @@ func TestWindowsReplacementRetriesSharingViolation(t *testing.T) {
 		t.Fatal("replacement did not finish after the reader closed")
 	}
 	var value string
-	if err := readJSON(path, &value); err != nil || value != "new" {
+	if err := ReadJSON(path, &value); err != nil || value != "new" {
 		t.Fatalf("replacement not persisted: value=%q error=%v", value, err)
 	}
 }
 
 func TestWindowsReplacementSharingTimeoutPreservesCredentials(t *testing.T) {
-	c := testClient(t)
-	path := filepath.Join(c.dir, "tokens.json")
-	if err := writeJSON(path, "old"); err != nil {
+	dir := testStorageDir(t)
+	path := filepath.Join(dir, "tokens.json")
+	if err := WriteJSON(path, "old"); err != nil {
 		t.Fatal(err)
 	}
 	reader, err := os.Open(path)
@@ -172,17 +172,17 @@ func TestWindowsReplacementSharingTimeoutPreservesCredentials(t *testing.T) {
 	}
 	defer reader.Close()
 	start := time.Now()
-	if err := writeJSON(path, "new"); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) && !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+	if err := WriteJSON(path, "new"); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) && !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 		t.Fatalf("expected bounded sharing violation: %v", err)
 	}
 	if time.Since(start) > 3*time.Second {
 		t.Fatal("sharing retry exceeded its bound")
 	}
 	var value string
-	if err := readJSON(path, &value); err != nil || value != "old" {
+	if err := ReadJSON(path, &value); err != nil || value != "old" {
 		t.Fatalf("failed replacement lost the old credential: %q, %v", value, err)
 	}
-	entries, err := os.ReadDir(c.dir)
+	entries, err := os.ReadDir(dir)
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("failed replacement leaked temporary credentials: %v", err)
 	}

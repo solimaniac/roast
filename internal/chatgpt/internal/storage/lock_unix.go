@@ -1,6 +1,6 @@
 //go:build !windows
 
-package chatgpt
+package storage
 
 import (
 	"errors"

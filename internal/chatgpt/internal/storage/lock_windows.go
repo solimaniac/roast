@@ -1,4 +1,4 @@
-package chatgpt
+package storage
 
 import (
 	"errors"

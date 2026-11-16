@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bluesky-social/roast/internal/chatgpt/internal/oauth"
 )
 
 func scopeValue(scope string) *string { return &scope }
@@ -18,9 +20,9 @@ func TestRefreshScopePresence(t *testing.T) {
 		present bool
 		want    string
 	}{
-		{"omitted", nil, false, Scope},
-		{"null", nil, true, Scope},
-		{"unchanged", Scope, true, Scope},
+		{"omitted", nil, false, oauth.Scope},
+		{"null", nil, true, oauth.Scope},
+		{"unchanged", oauth.Scope, true, oauth.Scope},
 		{"reduced", "openid profile email", true, "openid profile email"},
 		{"empty", "", true, ""},
 		{"whitespace", " \t ", true, " \t "},
@@ -29,7 +31,7 @@ func TestRefreshScopePresence(t *testing.T) {
 			c := testClient(t)
 			seed(t, c, time.Now().Add(-time.Minute))
 			var calls int
-			c.http.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+			c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
 				calls++
 				if r.URL.String() != tokenURL {
 					t.Fatal("unexpected request")
@@ -41,7 +43,7 @@ func TestRefreshScopePresence(t *testing.T) {
 				return response(data), nil
 			})
 			token, err := c.Token(context.Background())
-			if tc.want == Scope {
+			if tc.want == oauth.Scope {
 				if err != nil || token != "rotated-access" {
 					t.Fatalf("unchanged grant lost: %v", err)
 				}
@@ -61,11 +63,11 @@ func TestOmittedRefreshScopeSurvivesPendingRecovery(t *testing.T) {
 	seed(t, c, time.Now().Add(-time.Minute))
 	key := signingKey(t)
 	var refreshes, fetches int
-	c.http.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+	c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
 		switch r.URL.String() {
 		case tokenURL:
 			refreshes++
-			return response(tokenResponse{AccessToken: "rotated-access", RefreshToken: "rotated-refresh", IDToken: signed(t, key, claims("")), TokenType: "Bearer", ExpiresIn: 3600}), nil
+			return response(oauth.TokenResponse{AccessToken: "rotated-access", RefreshToken: "rotated-refresh", IDToken: signed(t, key, claims("")), TokenType: "Bearer", ExpiresIn: 3600}), nil
 		case jwksURL:
 			fetches++
 			if fetches == 1 {
@@ -81,7 +83,7 @@ func TestOmittedRefreshScopeSurvivesPendingRecovery(t *testing.T) {
 		t.Fatalf("pending result escaped: %v", err)
 	}
 	v, err := c.load(c.selected)
-	if err != nil || v.Pending == nil || v.Pending.Response.Scope != nil || v.Scopes != Scope || v.Pending.Response.RefreshToken != "rotated-refresh" {
+	if err != nil || v.Pending == nil || v.Pending.Response.Scope != nil || v.Scopes != oauth.Scope || v.Pending.Response.RefreshToken != "rotated-refresh" {
 		t.Fatal("pending response lost scope absence or rotation")
 	}
 	resumed := *c
@@ -89,15 +91,15 @@ func TestOmittedRefreshScopeSurvivesPendingRecovery(t *testing.T) {
 		t.Fatalf("pending recovery failed: %v", err)
 	}
 	v, err = c.load(c.selected)
-	if err != nil || v.Scopes != Scope || v.Pending != nil || v.RefreshToken != "rotated-refresh" {
+	if err != nil || v.Scopes != oauth.Scope || v.Pending != nil || v.RefreshToken != "rotated-refresh" {
 		t.Fatal("pending scope was not preserved")
 	}
 }
 
 func TestInitialTokenDoesNotInheritScopes(t *testing.T) {
 	c := testClient(t)
-	v := credential{Scopes: Scope}
-	if err := c.apply(&v, tokenResponse{IDToken: "identity-only"}); err != nil || v.Scopes != "" {
+	v := credential{Scopes: oauth.Scope}
+	if err := v.apply(oauth.TokenResponse{IDToken: "identity-only"}, c.now()); err != nil || v.Scopes != "" {
 		t.Fatalf("initial authorization inherited an old grant: %v", err)
 	}
 }

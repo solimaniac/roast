@@ -1,4 +1,4 @@
-package chatgpt
+package oauth
 
 import (
 	"encoding/json"
@@ -6,13 +6,15 @@ import (
 	"time"
 )
 
-// refreshTimestamp normalizes optional provider scheduling metadata to Unix
+const maxRefreshUnix int64 = 253402300799 // Last second representable by an RFC3339 year.
+
+// RefreshTimestamp normalizes optional provider scheduling metadata to Unix
 // seconds. Unlike credentials, malformed scheduling hints must not prevent a
 // rotated refresh token from reaching the durable pending checkpoint. An absent
 // or invalid hint leaves the normal expiry-based refresh policy in effect.
-type refreshTimestamp int64
+type RefreshTimestamp int64
 
-func (t *refreshTimestamp) UnmarshalJSON(data []byte) error {
+func (t *RefreshTimestamp) UnmarshalJSON(data []byte) error {
 	*t = 0
 	raw := strings.TrimSpace(string(data))
 	if strings.HasPrefix(raw, "\"") {
@@ -23,9 +25,8 @@ func (t *refreshTimestamp) UnmarshalJSON(data []byte) error {
 	}
 	// Accept epoch seconds, including numeric strings. Round fractions upward
 	// so scheduling never permits refresh before the supplied earliest instant.
-	const maxUnix = 253402300799 // Last second representable by an RFC3339 year.
 	if seconds, numeric := ceilRefreshSeconds(raw); numeric {
-		*t = refreshTimestamp(seconds)
+		*t = RefreshTimestamp(seconds)
 		return nil
 	}
 	if instant, err := time.Parse(time.RFC3339Nano, raw); err == nil {
@@ -44,8 +45,8 @@ func (t *refreshTimestamp) UnmarshalJSON(data []byte) error {
 		if fraction {
 			seconds++
 		}
-		if seconds > 0 && seconds <= maxUnix {
-			*t = refreshTimestamp(seconds)
+		if seconds > 0 && seconds <= maxRefreshUnix {
+			*t = RefreshTimestamp(seconds)
 		}
 	}
 	return nil
@@ -55,7 +56,6 @@ func (t *refreshTimestamp) UnmarshalJSON(data []byte) error {
 // expands an exponent or rounds through floating point; input-sized work and a
 // twelve-digit integer bound keep arbitrary optional metadata inexpensive.
 func ceilRefreshSeconds(raw string) (int64, bool) {
-	const maxUnix int64 = 253402300799
 	if raw == "" {
 		return 0, false
 	}
@@ -64,64 +64,32 @@ func ceilRefreshSeconds(raw string) (int64, bool) {
 		negative = raw[0] == '-'
 		raw = raw[1:]
 	}
-	var digits strings.Builder
-	decimal, exponentStart := -1, -1
-	for i := 0; i < len(raw); i++ {
-		ch := raw[i]
-		switch {
-		case ch >= '0' && ch <= '9':
-			digits.WriteByte(ch)
-		case ch == '.' && decimal < 0:
-			decimal = digits.Len()
-		case ch == 'e' || ch == 'E':
-			exponentStart = i + 1
-		default:
-			return 0, false
-		}
-		if exponentStart >= 0 {
-			break
-		}
-	}
-	if digits.Len() == 0 {
-		return 0, false
-	}
-	if decimal < 0 {
-		decimal = digits.Len()
-	}
+
+	// Split the exponent and decimal point before interpreting the digits.
+	// Numeric strings may omit either side of the point, but need a digit.
+	mantissa := raw
 	exponent := 0
-	if exponentStart >= 0 {
-		part := raw[exponentStart:]
-		sign := 1
-		if len(part) > 0 && (part[0] == '+' || part[0] == '-') {
-			if part[0] == '-' {
-				sign = -1
-			}
-			part = part[1:]
-		}
-		if part == "" {
+	if i := strings.IndexAny(raw, "eE"); i >= 0 {
+		mantissa = raw[:i]
+		var ok bool
+		exponent, ok = boundedExponent(raw[i+1:], len(raw)+16)
+		if !ok {
 			return 0, false
 		}
-		// Beyond the input length plus the output bound, only the sign matters.
-		limit := len(raw) + 16
-		for _, ch := range part {
-			if ch < '0' || ch > '9' {
-				return 0, false
-			}
-			if exponent < limit {
-				exponent = min(exponent*10+int(ch-'0'), limit)
-			}
-		}
-		exponent *= sign
+	}
+	whole, fraction, _ := strings.Cut(mantissa, ".")
+	digits := whole + fraction
+	if digits == "" || !decimalDigits(whole) || !decimalDigits(fraction) {
+		return 0, false
 	}
 	if negative {
 		return 0, true
 	}
-	allDigits := digits.String()
-	significant := strings.TrimLeft(allDigits, "0")
+	significant := strings.TrimLeft(digits, "0")
 	if significant == "" {
 		return 0, true
 	}
-	position := decimal + exponent - (len(allDigits) - len(significant))
+	position := len(whole) + exponent - (len(digits) - len(significant))
 	if position <= 0 {
 		return 1, true
 	}
@@ -138,8 +106,39 @@ func ceilRefreshSeconds(raw string) (int64, bool) {
 	if position < len(significant) && strings.ContainsAny(significant[position:], "123456789") {
 		seconds++
 	}
-	if seconds > maxUnix {
+	if seconds > maxRefreshUnix {
 		return 0, true
 	}
 	return seconds, true
+}
+
+func decimalDigits(s string) bool {
+	for i := range len(s) {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// Beyond the input length plus the output bound, only the sign matters.
+func boundedExponent(raw string, limit int) (int, bool) {
+	sign := 1
+	if digits, negative := strings.CutPrefix(raw, "-"); negative {
+		raw = digits
+		sign = -1
+	} else {
+		raw = strings.TrimPrefix(raw, "+")
+	}
+	if raw == "" || !decimalDigits(raw) {
+		return 0, false
+	}
+	exponent := 0
+	for i := range len(raw) {
+		exponent = exponent*10 + int(raw[i]-'0')
+		if exponent >= limit {
+			return sign * limit, true
+		}
+	}
+	return sign * exponent, true
 }

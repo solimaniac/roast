@@ -1,6 +1,8 @@
-package chatgpt
+package storage
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -86,7 +88,7 @@ func checkPrivateDescriptor(sd *windows.SECURITY_DESCRIPTOR) error {
 	return nil
 }
 
-func secureDir(dir string) error {
+func EnsureDir(dir string) error {
 	// Only the final directory stores credentials; create it with its ACL in
 	// place, rather than briefly exposing it through inherited permissions.
 	if err := os.MkdirAll(filepath.Dir(dir), 0700); err != nil {
@@ -139,11 +141,11 @@ func privateLock(path string) (*os.File, error) { return createPrivate(path, win
 
 func privateTemp(dir string) (*os.File, error) {
 	for i := 0; i < 10; i++ {
-		name, err := randomValue()
-		if err != nil {
+		var suffix [32]byte
+		if _, err := rand.Read(suffix[:]); err != nil {
 			return nil, err
 		}
-		f, err := createPrivate(filepath.Join(dir, ".credentials-"+name), windows.CREATE_NEW)
+		f, err := createPrivate(filepath.Join(dir, ".credentials-"+hex.EncodeToString(suffix[:])), windows.CREATE_NEW)
 		if errors.Is(err, windows.ERROR_FILE_EXISTS) {
 			continue
 		}

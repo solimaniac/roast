@@ -1,6 +1,7 @@
 package chatgpt
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -54,4 +55,21 @@ func (c *Client) ensureHost(i *index) error {
 	}
 	i.HostID = id
 	return c.saveIndex(*i)
+}
+
+// PrepareHost explicitly initializes only this runtime's stable host identity.
+// It creates no OAuth client registration or token.
+func (c *Client) PrepareHost(ctx context.Context) (hostID, dir string, err error) {
+	err = c.locked(ctx, func() error {
+		i, err := c.loadIndex()
+		if err != nil {
+			return err
+		}
+		if err = c.ensureHost(&i); err != nil {
+			return err
+		}
+		hostID = i.HostID
+		return nil
+	})
+	return hostID, c.dir, err
 }
