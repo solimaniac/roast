@@ -32,7 +32,7 @@ account-available slugs with `roast chatgpt models`, then run `roast doctor` for
 live two-turn probes. Never read Codex tokens or silently use API billing.
 `max_output_tokens` is only an admission estimate here; the
 plan-usage preview rejects a hard generation cap. Raw SSE and finalized reasoning
-history are retained. Direct sign-in supports Linux/macOS, not Windows yet.
+history are retained. Direct sign-in supports Linux, macOS, and Windows.
 A configured profile, saved login, or mock test is not a live validation.
 
 `roast skill install` installs this skill into the shared Agent Skills location

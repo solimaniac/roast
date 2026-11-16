@@ -10,7 +10,7 @@ and evaluation are not part of the `roast` command.
 ## 1. Install the current release
 
 Upgrade with the method you originally used to install Roast (see the
-upstream [Install](https://github.com/bluesky-social/roast#install) section), then confirm which binary is
+README's [Install](../README.md#install) section), then confirm which binary is
 active:
 
 ```sh

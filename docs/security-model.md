@@ -14,46 +14,26 @@ file.
 
 ## Direct ChatGPT plan usage
 
-The opt-in `chatgpt` protocol is a direct Responses provider. It addresses the architectural concerns described in
-[upstream issue 127](https://github.com/bluesky-social/roast/issues/127#issuecomment-6693962921):
-Roast retains its own agent loop, scoped read-only exploration tools, final
-submission schema validation, and raw provider-response records. It does not
-launch Codex or delegate the review to a general-purpose CLI harness.
+The opt-in `chatgpt` protocol uses Roast's native tool loop with the fixed
+public OpenAI model-list and Responses endpoints. It never reads Codex
+credentials or falls back to API billing. Endpoint/key overrides, ambient SDK
+credentials, and redirects are rejected. Requests disable storage and replay
+full history, including finalized reasoning. Only local `roast` tools are
+accepted, and dispatch waits for a valid completion and successful SSE capture.
 
-Roast sends its prompts as native developer/user messages and exposes only its
-local function tools in the `roast` namespace. It preserves finalized raw
-assistant output, including encrypted reasoning, in conversation replay. Tools
-remain buffered until a valid `response.completed` and successful raw SSE
-capture. Failed/incomplete/interrupted streams, other tool namespaces, and
-unsupported output types stop the turn without dispatching buffered tools.
-The existing snapshot/path boundary is unchanged: when Git tree pinning fails,
-Roast's existing warned fallback reads the live tree under path guards. This
-backend does not promise a captured snapshot in that fallback case.
+Explicit `roast chatgpt signin` authorizes a separate OAuth registration using
+PKCE, state, nonce, and verified ID-token identity. Credentials stay in Roast's
+private config directory. Atomic writes, OS-released locks, and durable pending
+refresh responses protect rotation. Windows storage requires a protected DACL
+owned by and granting access only to the current user; reparse points and
+insecure storage are rejected. Manual VM transfers must preserve the target
+host identity created by `roast chatgpt prepare-host`.
 
-The OAuth access token is sent only to the fixed public OpenAI model-list and
-Responses endpoints. Requests use `store: false`, `stream: true`, and full input
-history. Endpoint overrides, API-key overrides, ambient credential headers,
-redirects, and automatic alternative billing are not allowed. Ordinary OpenAI
-service policies and account/workspace restrictions still apply.
-
-Explicit `roast chatgpt signin` creates a separate public-client OAuth grant.
-PKCE, state, nonce, ID-token signature/identity checks, and granted scopes protect
-registration. Roast owns these credentials under its private config directory;
-it never reads Codex credentials. Atomic owner-only files, OS-released locks,
-and protected pending refresh responses handle rotation and interruption.
-Returning sign-in does not force consent unless the user requests `--enable-plan`.
-On Windows, credential directories and files are created with a protected DACL
-granting access only to the current user. Reads and locks reject storage owned
-by another user, unprotected DACLs, ACLs granting other principals access, and reparse points.
-Credential replacements flush file contents and use a write-through move.
-Existing insecure storage is rejected rather than silently changing its ACL.
-VM credential transfer is manual and must
-preserve the target host identity; see the README and official VM guide.
-
-The preview rejects `max_output_tokens`: output estimates and shared token
-budgets are soft, while request deadlines still apply. A saved grant and mocked
-tests do not prove a particular account/model is eligible. Run the separately
-authorized two-turn `roast doctor` or opt-in live test to verify it. This fork has no Codex CLI inference fallback.
+`--enable-plan` explicitly requests renewed consent. Sign-out clears local
+tokens and attempts remote revocation. Account eligibility and service policies
+still apply. The preview rejects `max_output_tokens`, so token budgets are soft;
+request deadlines still apply. Mock tests and saved credentials do not establish
+live compatibility. `roast doctor` and the opt-in live test consume plan usage.
 
 ## Configuration templates
 

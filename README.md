@@ -5,7 +5,7 @@ using your ChatGPT plan through OpenAI's public API, with its own OAuth sign-in.
 It does not use the Codex CLI or Codex credentials.
 
 **Experimental:** live end-to-end verification is incomplete. Not production-ready.
-Requires Linux, macOS, or Windows and Go 1.27.3+.
+Requires Linux, macOS, or Windows and Go 1.27.4+.
 
 ## Install
 
