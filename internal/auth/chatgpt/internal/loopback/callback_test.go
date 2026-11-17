@@ -5,10 +5,36 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestReauthorizationCallbackParameters(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		query url.Values
+		valid bool
+	}{
+		{"client ID omitted", url.Values{"code": {"one-use-code"}}, true},
+		{"same client ID", url.Values{"code": {"one-use-code"}, "client_id": {"saved"}}, true},
+		{"explicit empty client ID", url.Values{"code": {"one-use-code"}, "client_id": {""}}, false},
+		{"empty error with code", url.Values{"code": {"one-use-code"}, "error": {""}}, false},
+		{"repeated error with code", url.Values{"code": {"one-use-code"}, "error": {"", "access_denied"}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := parseCallback(tc.query, "saved")
+			if tc.valid {
+				if err != nil || result != (Result{Code: "one-use-code", ClientID: "saved"}) {
+					t.Fatalf("callback lost the saved registration: %v", err)
+				}
+			} else if err == nil || result != (Result{}) {
+				t.Fatal("malformed callback supplied a code for exchange")
+			}
+		})
+	}
+}
 
 func TestCallbackListenerTermination(t *testing.T) {
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")

@@ -131,13 +131,17 @@ func callbackHandler(host, state, clientID string, diagnostics Diagnostics, call
 func parseCallback(values url.Values, clientID string) (Result, error) {
 	code, issuedID := values.Get("code"), values.Get("client_id")
 	switch {
-	case values.Get("error") != "":
-		return Result{}, fmt.Errorf("ChatGPT authorization failed (%s)", oauth.ErrorCategory(values.Get("error")))
+	case values.Has("error"):
+		category := "oauth_error"
+		if len(values["error"]) == 1 {
+			category = oauth.ErrorCategory(values.Get("error"))
+		}
+		return Result{}, fmt.Errorf("ChatGPT authorization failed (%s)", category)
 	case len(values["code"]) != 1 || code == "" || len(values["client_id"]) > 1:
 		return Result{}, errors.New("incomplete ChatGPT callback")
 	case clientID == "" && !validIssuedClientID(issuedID):
 		return Result{}, errors.New("missing issued ChatGPT client ID")
-	case clientID != "" && issuedID != "" && issuedID != clientID:
+	case clientID != "" && values.Has("client_id") && issuedID != clientID:
 		return Result{}, errors.New("ChatGPT registration changed during sign-in")
 	}
 	if clientID == "" {
