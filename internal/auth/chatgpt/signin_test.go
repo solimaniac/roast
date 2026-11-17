@@ -29,7 +29,11 @@ func TestSignInCallbackAndPKCE(t *testing.T) {
 			if r.Form.Get("client_id") != "oaiapp_test" || r.Form.Get("redirect_uri") != redirect || r.Form.Get("resource") != oauth.APIBaseURL {
 				t.Error("incorrect exchange")
 			}
-			sum := sha256.Sum256([]byte(r.Form.Get("code_verifier")))
+			verifier := r.Form.Get("code_verifier")
+			if len(verifier) < 43 || len(verifier) > 128 {
+				t.Error("PKCE verifier length is outside the RFC 7636 range")
+			}
+			sum := sha256.Sum256([]byte(verifier))
 			if base64.RawURLEncoding.EncodeToString(sum[:]) != challenge {
 				t.Error("PKCE mismatch")
 			}
@@ -51,6 +55,9 @@ func TestSignInCallbackAndPKCE(t *testing.T) {
 		redirect = q.Get("redirect_uri")
 		nonce = q.Get("nonce")
 		challenge = q.Get("code_challenge")
+		if q.Get("code_challenge_method") != "S256" || nonce == "" || q.Get("state") == "" || nonce == q.Get("state") {
+			t.Error("authorization must use S256 and independent state and nonce values")
+		}
 		if !strings.HasPrefix(redirect, "http://127.0.0.1:") {
 			t.Error("not loopback")
 		}

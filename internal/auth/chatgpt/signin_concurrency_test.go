@@ -519,24 +519,33 @@ func TestSignInTokenExpiryAnchoredToReceipt(t *testing.T) {
 	}
 }
 
+// writeSelectionVersion simulates an older writer while a browser sign-in is
+// pending. It returns the version that the pending sign-in could have observed.
+func writeSelectionVersion(t *testing.T, c *Client, version uint64) uint64 {
+	t.Helper()
+	var previous uint64
+	if err := c.withSessionLock(t.Context(), func() error {
+		i, err := c.loadIndex()
+		if err != nil {
+			return err
+		}
+		previous = i.SelectionVersion
+		i.SelectionVersion = version
+		return c.saveIndex(i)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return previous
+}
+
 func TestPendingSignInPreservesLegacyReselection(t *testing.T) {
 	c := testClient(t)
 	seed(t, c, time.Now().Add(time.Hour))
 	c.provider.HTTP.Transport = mockSignInTransport(t, signingKey(t))
 	auth, done := beginMockSignIn(t, c, "")
-	if err := c.withSessionLock(context.Background(), func() error {
-		i, err := c.loadIndex()
-		if err != nil {
-			return err
-		}
-		if i.SelectionVersion == 0 {
-			t.Error("legacy selection snapshot was not upgraded")
-		}
-		// An older binary writes no version when explicitly reselecting A.
-		i.SelectionVersion = 0
-		return c.saveIndex(i)
-	}); err != nil {
-		t.Fatal(err)
+	// An older binary writes no version when explicitly reselecting A.
+	if previous := writeSelectionVersion(t, c, 0); previous == 0 {
+		t.Error("legacy selection snapshot was not upgraded")
 	}
 	completeMockCallback(t, auth, "account-b")
 	if err := awaitMockSignIn(t, done); err != nil {
@@ -554,29 +563,11 @@ func TestPendingSignInPreservesLegacyReselectionAcrossAnotherSignIn(t *testing.T
 	addMockAccount(t, c, "account-b")
 	addMockAccount(t, c, "account-c")
 	c.provider.HTTP.Transport = mockSignInTransport(t, signingKey(t))
-	if err := c.withSessionLock(context.Background(), func() error {
-		i, err := c.loadIndex()
-		if err != nil {
-			return err
-		}
-		i.SelectionVersion = 1
-		return c.saveIndex(i)
-	}); err != nil {
-		t.Fatal(err)
-	}
+	writeSelectionVersion(t, c, 1)
 	// B snapshots (A, 1), then an older binary explicitly reselects A and
 	// drops the revision. C begins authorizing and initializes that revision.
 	first, firstDone := beginMockSignIn(t, c, "account-b")
-	if err := c.withSessionLock(context.Background(), func() error {
-		i, err := c.loadIndex()
-		if err != nil {
-			return err
-		}
-		i.SelectionVersion = 0
-		return c.saveIndex(i)
-	}); err != nil {
-		t.Fatal(err)
-	}
+	writeSelectionVersion(t, c, 0)
 	other := *c
 	second, secondDone := beginMockSignIn(t, &other, "account-c")
 	i, err := c.loadIndex()
@@ -618,16 +609,7 @@ func TestPendingSignInPreservesLegacyReselectionAcrossSelect(t *testing.T) {
 	auth, done := beginMockSignIn(t, c, "account-b")
 	// An older Select(A) drops the revision. A newer Select(A) must not
 	// recreate B's snapshot, even though the selected account stays the same.
-	if err = c.withSessionLock(context.Background(), func() error {
-		i, err := c.loadIndex()
-		if err != nil {
-			return err
-		}
-		i.SelectionVersion = 0
-		return c.saveIndex(i)
-	}); err != nil {
-		t.Fatal(err)
-	}
+	writeSelectionVersion(t, c, 0)
 	other := *c
 	if err = other.Select(context.Background(), c.selected); err != nil {
 		t.Fatal(err)

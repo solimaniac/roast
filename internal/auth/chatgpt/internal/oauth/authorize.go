@@ -21,8 +21,12 @@ type Authorization struct {
 // NewAuthorization binds a fresh state, OIDC nonce, and PKCE verifier to one sign-in.
 func NewAuthorization(clientID, hostID string, consent bool) Authorization {
 	return Authorization{
-		ClientID: clientID, HostID: hostID, Consent: consent,
-		State: rand.Text(), Nonce: rand.Text(), Verifier: oauth2.GenerateVerifier(),
+		ClientID: clientID,
+		HostID:   hostID,
+		Consent:  consent,
+		State:    rand.Text(),
+		Nonce:    rand.Text(),
+		Verifier: oauth2.GenerateVerifier(),
 	}
 }
 

@@ -17,7 +17,6 @@ func TestRefreshTimestampRepresentations(t *testing.T) {
 		{"sub-ULP fraction", `1794182400.0000001`, 1794182401},
 		{"sub-ULP string", `"1794182400.0000001"`, 1794182401},
 		{"tiny decimal remainder", `1794182400.0000000000000000000000000000000000000000000000000000000000000000000000000000000000001`, 1794182401},
-
 		{"leading decimal point", `"+.25E2"`, 25},
 		{"trailing decimal point", `"1.e2"`, 100},
 		{"multiple decimal points", `"1..1"`, 0},
@@ -25,6 +24,8 @@ func TestRefreshTimestampRepresentations(t *testing.T) {
 		{"exponent", `1.7941824e9`, 1794182400},
 		{"tiny exponent", `1e-999999999`, 1},
 		{"huge exponent", `1e999999999`, 0},
+		{"exponent beyond int64", `1e99999999999999999999999`, 0},
+		{"negative exponent beyond int64", `1e-99999999999999999999999`, 1},
 		{"maximum", `253402300799`, 253402300799},
 		{"past maximum fraction", `253402300799.0000000001`, 0},
 		{"leading zeros", `"0001794182400.0001"`, 1794182401},
@@ -85,7 +86,6 @@ func TestRefreshTimestampTinyRemainders(t *testing.T) {
 			}
 		}
 	}
-
 }
 
 func TestRefreshTimestampInvalidHintClearsPreviousValue(t *testing.T) {

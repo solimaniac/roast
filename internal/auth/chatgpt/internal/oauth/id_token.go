@@ -117,10 +117,9 @@ func (claims identityClaims) validFor(clientID, nonce string, now time.Time) boo
 	} else if json.Unmarshal(claims.Audience, &audiences) != nil {
 		return false
 	}
-	if len(audiences) > 1 || claims.AuthorizedParty != "" {
-		if claims.AuthorizedParty != clientID {
-			return false
-		}
+	checkParty := len(audiences) > 1 || claims.AuthorizedParty != ""
+	if checkParty && claims.AuthorizedParty != clientID {
+		return false
 	}
 	return clientID != "" && slices.Contains(audiences, clientID)
 }
