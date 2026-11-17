@@ -13,7 +13,10 @@ import (
 )
 
 func newChatGPTCommand(stdout io.Writer) *cobra.Command {
-	root := &cobra.Command{Use: "chatgpt", Short: "Manage Roast's independent ChatGPT plan connection"}
+	root := &cobra.Command{
+		Use:   "chatgpt",
+		Short: "Manage Roast's independent ChatGPT plan connection",
+	}
 	root.AddCommand(
 		newChatGPTSignInCommand(stdout),
 		newChatGPTStatusCommand(stdout),
@@ -30,7 +33,10 @@ func newChatGPTSignInCommand(stdout io.Writer) *cobra.Command {
 	var enablePlan bool
 	var diagnostics bool
 	signin := &cobra.Command{
-		Use: "signin", Aliases: []string{"login"}, Short: "Continue with ChatGPT (authorize plan access in your browser)", Args: cobra.NoArgs,
+		Use:     "signin",
+		Aliases: []string{"login"},
+		Short:   "Continue with ChatGPT (authorize plan access in your browser)",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			client, err := chatgpt.New()
 			if err != nil {
@@ -47,10 +53,11 @@ func newChatGPTSignInCommand(stdout io.Writer) *cobra.Command {
 				_, err := fmt.Fprintf(stdout, "Continue with ChatGPT\nOpen this URL in a browser on this computer:\n%s\n", authURL)
 				return err
 			})
-			if err == nil {
-				fmt.Fprintln(stdout, "ChatGPT account connected. Review usage and permissions at https://chatgpt.com/settings/usage")
+			if err != nil {
+				return err
 			}
-			return err
+			fmt.Fprintln(stdout, "ChatGPT account connected. Review usage and permissions at https://chatgpt.com/settings/usage")
+			return nil
 		},
 	}
 	signin.Flags().BoolVar(&diagnostics, "diagnostics", false, "Report fixed sign-in phases without authorization data")
@@ -61,7 +68,9 @@ func newChatGPTSignInCommand(stdout io.Writer) *cobra.Command {
 
 func newChatGPTStatusCommand(stdout io.Writer) *cobra.Command {
 	return &cobra.Command{
-		Use: "status", Short: "List saved accounts and the active registration", Args: cobra.NoArgs,
+		Use:   "status",
+		Short: "List saved accounts and the active registration",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			client, err := chatgpt.New()
 			if err != nil {
@@ -77,7 +86,9 @@ func newChatGPTStatusCommand(stdout io.Writer) *cobra.Command {
 				fmt.Fprintln(stdout, "No ChatGPT accounts. Run roast chatgpt signin.")
 			}
 			for _, account := range accounts {
-				fmt.Fprintf(stdout, "%s  %s  active=%t signed_in=%t plan_enabled=%t pending_registration=%t\n", textsafe.Text(account.ClientID), textsafe.Text(account.Email), account.Active, account.SignedIn, account.PlanEnabled, account.PendingRegistration)
+				fmt.Fprintf(stdout, "%s  %s  active=%t signed_in=%t plan_enabled=%t pending_registration=%t\n",
+					textsafe.Text(account.ClientID), textsafe.Text(account.Email),
+					account.Active, account.SignedIn, account.PlanEnabled, account.PendingRegistration)
 			}
 			return nil
 		},
@@ -86,7 +97,9 @@ func newChatGPTStatusCommand(stdout io.Writer) *cobra.Command {
 
 func newChatGPTSelectCommand() *cobra.Command {
 	return &cobra.Command{
-		Use: "select CLIENT_ID", Short: "Select a saved ChatGPT registration", Args: cobra.ExactArgs(1),
+		Use:   "select CLIENT_ID",
+		Short: "Select a saved ChatGPT registration",
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := chatgpt.New()
 			if err != nil {
@@ -101,7 +114,9 @@ func newChatGPTSelectCommand() *cobra.Command {
 
 func newChatGPTSignOutCommand(stdout io.Writer) *cobra.Command {
 	return &cobra.Command{
-		Use: "signout [CLIENT_ID]", Short: "Revoke and clear this registration's tokens, retaining its identity", Args: cobra.MaximumNArgs(1),
+		Use:   "signout [CLIENT_ID]",
+		Short: "Revoke and clear this registration's tokens, retaining its identity",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := chatgpt.New()
 			if err != nil {
@@ -113,7 +128,7 @@ func newChatGPTSignOutCommand(stdout io.Writer) *cobra.Command {
 			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), time.Minute)
 			defer cancel()
-			if err = client.SignOut(ctx, id); err != nil {
+			if err := client.SignOut(ctx, id); err != nil {
 				return err
 			}
 			fmt.Fprintln(stdout, "Signed out of ChatGPT.")
@@ -124,7 +139,9 @@ func newChatGPTSignOutCommand(stdout io.Writer) *cobra.Command {
 
 func newChatGPTModelsCommand(stdout io.Writer) *cobra.Command {
 	return &cobra.Command{
-		Use: "models", Short: "List models available to the selected ChatGPT account", Args: cobra.NoArgs,
+		Use:   "models",
+		Short: "List models available to the selected ChatGPT account",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			client, err := chatgpt.New()
 			if err != nil {
@@ -148,7 +165,9 @@ func newChatGPTModelsCommand(stdout io.Writer) *cobra.Command {
 
 func newChatGPTPrepareHostCommand(stdout io.Writer) *cobra.Command {
 	return &cobra.Command{
-		Use: "prepare-host", Short: "Create a stable host identity before a user-managed VM credential transfer", Args: cobra.NoArgs,
+		Use:   "prepare-host",
+		Short: "Create a stable host identity before a user-managed VM credential transfer",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			client, err := chatgpt.New()
 			if err != nil {
