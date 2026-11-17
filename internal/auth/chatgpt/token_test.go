@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -206,8 +205,12 @@ func TestPendingWrongIdentityNeverExposed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(after, before) {
-		t.Error("rejected identity changed stored credentials")
+	assertClearedCredentials(t, after)
+	if after.ClientID != before.ClientID || after.Subject != before.Subject {
+		t.Error("rejection changed account identity")
+	}
+	if token, err := c.Token(t.Context()); token != "" || !errors.Is(err, ErrAuth) || jwksCalls != 1 {
+		t.Fatalf("retry = %q, %v; JWKS calls = %d; want signed-out failure without network", token, err, jwksCalls)
 	}
 }
 
@@ -278,8 +281,8 @@ func TestPendingRefreshDelayedPastIDExpiry(t *testing.T) {
 	}
 }
 
-func TestPendingRefreshRejectsInvalidReceiptOrExpiredIdentity(t *testing.T) {
-	for _, name := range []string{"zero receipt", "pre-epoch receipt", "future receipt", "expired at receipt"} {
+func TestPendingRefreshRejectsPermanentFailures(t *testing.T) {
+	for _, name := range []string{"zero receipt", "pre-epoch receipt", "future receipt", "expired at receipt", "malformed ID token", "invalid signature", "incomplete response"} {
 		t.Run(name, func(t *testing.T) {
 			c := testClient(t)
 			now := time.Now().UTC().Truncate(time.Second)
@@ -305,6 +308,14 @@ func TestPendingRefreshRejectsInvalidReceiptOrExpiredIdentity(t *testing.T) {
 				t.Fatal(err)
 			}
 			v.Pending = &pendingRefresh{Response: oauth.TokenResponse{AccessToken: "pending-access", RefreshToken: "pending-refresh", IDToken: signed(t, key, cl), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600}, ReceivedAt: received}
+			switch name {
+			case "malformed ID token":
+				v.Pending.Response.IDToken = "malformed"
+			case "invalid signature":
+				v.Pending.Response.IDToken = signed(t, signingKey(t), cl)
+			case "incomplete response":
+				v.Pending.Response.TokenType = "unsupported"
+			}
 			if err := c.save(v); err != nil {
 				t.Fatal(err)
 			}
@@ -321,9 +332,7 @@ func TestPendingRefreshRejectsInvalidReceiptOrExpiredIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if saved.Pending == nil || saved.AccessToken != "access" {
-				t.Fatal("invalid pending credentials became active")
-			}
+			assertClearedCredentials(t, saved)
 		})
 	}
 }
@@ -392,5 +401,12 @@ func TestRefreshRechecksExpiryAfterValidation(t *testing.T) {
 				t.Fatalf("next call failed to recover using rotated credentials: %v", err)
 			}
 		})
+	}
+}
+
+func assertClearedCredentials(t *testing.T, saved credential) {
+	t.Helper()
+	if saved.Pending != nil || saved.AccessToken != "" || saved.RefreshToken != "" || saved.IDToken != "" || saved.Scopes != "" || !saved.ExpiresAt.IsZero() || saved.EarliestRefreshAt != 0 {
+		t.Error("rejected credentials or refresh metadata remain stored")
 	}
 }

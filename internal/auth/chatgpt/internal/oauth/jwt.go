@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"net/http"
 	"slices"
@@ -32,9 +33,12 @@ type Identity struct {
 	Email   string
 }
 
+// ErrInvalidID identifies a rejected token, not a failure to retrieve its keys.
+var ErrInvalidID = errors.New("ChatGPT ID token validation failed")
+
 // ValidateID accepts only RS256; token-supplied key URLs and algorithms are never followed.
 func (c Client) ValidateID(ctx context.Context, raw, clientID, nonce string, now func() time.Time) (Identity, error) {
-	bad := errors.New("ChatGPT ID token validation failed")
+	bad := ErrInvalidID
 	parts := strings.Split(raw, ".")
 	if len(parts) != 3 {
 		return Identity{}, bad
@@ -60,10 +64,17 @@ func (c Client) ValidateID(ctx context.Context, raw, clientID, nonce string, now
 		Keys []jwk `json:"keys"`
 	}
 	if e = c.request(ctx, http.MethodGet, jwksURL, nil, "", &keys); e != nil {
-		return Identity{}, e
+		if errors.Is(e, context.Canceled) || errors.Is(e, context.DeadlineExceeded) {
+			return Identity{}, e
+		}
+		return Identity{}, fmt.Errorf("%w: cannot retrieve ChatGPT identity keys: %v", ErrNetwork, e)
 	}
 	hash := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
-	if !validSignature(keys.Keys, header.Kid, hash, sig) {
+	valid, keyFound := validSignature(keys.Keys, header.Kid, hash, sig)
+	if !keyFound {
+		return Identity{}, fmt.Errorf("%w: ChatGPT identity signing key unavailable; retry later", ErrNetwork)
+	}
+	if !valid {
 		return Identity{}, bad
 	}
 	var claims identityClaims
@@ -97,7 +108,7 @@ type jwk struct {
 	E   string `json:"e"`
 }
 
-func validSignature(keys []jwk, kid string, hash [sha256.Size]byte, sig []byte) bool {
+func validSignature(keys []jwk, kid string, hash [sha256.Size]byte, sig []byte) (valid, keyFound bool) {
 	for _, k := range keys {
 		if k.Kid != kid || k.Kty != "RSA" || (k.Use != "" && k.Use != "sig") || (k.Alg != "" && k.Alg != "RS256") {
 			continue
@@ -121,9 +132,10 @@ func validSignature(keys []jwk, kid string, hash [sha256.Size]byte, sig []byte) 
 		if key.N.BitLen() < 2048 {
 			continue
 		}
+		keyFound = true
 		if rsa.VerifyPKCS1v15(&key, crypto.SHA256, hash[:], sig) == nil {
-			return true
+			return true, true
 		}
 	}
-	return false
+	return false, keyFound
 }

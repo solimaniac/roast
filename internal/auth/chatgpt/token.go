@@ -104,7 +104,9 @@ func (c *Client) refresh(ctx context.Context, v credential) (string, error) {
 	// before fetching JWKS so a later call can retry validation.
 	v.Pending = &pendingRefresh{Response: tokens, ReceivedAt: c.now()}
 	if err := c.save(v); err != nil {
-		return "", err
+		// The provider may have consumed the old refresh token. Best-effort
+		// invalidation prevents its reuse if storage becomes writable again now.
+		return "", c.rejectPending(&v, fmt.Errorf("ChatGPT refresh completed but its replacement could not be durably saved: %w", err))
 	}
 	if err := c.acceptPending(ctx, &v); err != nil {
 		return "", err
@@ -124,29 +126,52 @@ func (c *Client) acceptPending(ctx context.Context, v *credential) error {
 	pending := v.Pending
 	receivedAt := pending.ReceivedAt
 	if receivedAt.IsZero() || receivedAt.Unix() <= 0 || receivedAt.After(c.now().Add(5*time.Second)) {
-		return errors.New("invalid pending ChatGPT token receipt time")
+		return c.rejectPending(v, errors.New("invalid pending ChatGPT token receipt time"))
 	}
 
 	response := pending.Response
+	// Reject structurally invalid replacements even when identity keys are offline.
+	next := *v
+	// Only an omitted scope inherits the prior grant; an explicit empty grant revokes it.
+	if response.Scope == nil {
+		response.Scope = &v.Scopes
+	}
+	if err := next.apply(response, receivedAt); err != nil {
+		return c.rejectPending(v, err)
+	}
 	if response.IDToken != "" {
 		// Validate identity at receipt so a JWKS outage can outlast the ID
 		// token. Access-token expiry is still checked against the live clock.
 		identity, err := c.provider.ValidateID(ctx, response.IDToken, v.ClientID, "", func() time.Time { return receivedAt })
 		if err != nil {
+			if errors.Is(err, oauth.ErrInvalidID) {
+				return c.rejectPending(v, err)
+			}
 			return err
 		}
 		if identity.Subject != v.Subject {
-			return errors.New("refreshed ChatGPT identity changed")
+			return c.rejectPending(v, errors.New("refreshed ChatGPT identity changed"))
 		}
 	}
-	// An omitted refresh scope inherits the prior grant. Honor an explicit
-	// empty or reduced grant, including after recovery from a pending response.
-	if response.Scope == nil {
-		response.Scope = &v.Scopes
+	next.Pending = nil
+	if err := c.save(next); err != nil {
+		return fmt.Errorf("could not persist validated ChatGPT credentials; repair credential storage and retry: %w", err)
 	}
-	if err := v.apply(response, receivedAt); err != nil {
-		return err
-	}
+	*v = next
+	return nil
+}
+
+// rejectPending runs under the session lock. Neither the rejected replacement
+// nor the old, possibly consumed refresh token may be used after this point.
+// Identity and registration remain available for explicit reauthorization.
+func (c *Client) rejectPending(v *credential, cause error) error {
+	v.clearTokens()
 	v.Pending = nil
-	return c.save(*v)
+	v.Scopes = ""
+	v.ExpiresAt = time.Time{}
+	v.EarliestRefreshAt = 0
+	if err := c.save(*v); err != nil {
+		return fmt.Errorf("%w; could not confirm local credential cleanup (%v); repair credential storage, then run roast chatgpt signin --account CLIENT_ID before retrying", cause, err)
+	}
+	return fmt.Errorf("%w; local credentials cleared; run roast chatgpt signin --account CLIENT_ID", cause)
 }
