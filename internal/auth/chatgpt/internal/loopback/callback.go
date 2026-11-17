@@ -166,5 +166,10 @@ func closeCallback(server *http.Server) {
 // Issued client IDs are opaque. The documented example prefix is not a format
 // contract; reject only the registration placeholder and malformed values.
 func validIssuedClientID(id string) bool {
-	return id != "" && id != oauth.DynamicClientID && len(id) <= 256 && utf8.ValidString(id) && strings.IndexFunc(id, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) < 0
+	if id == "" || id == oauth.DynamicClientID || len(id) > 256 || !utf8.ValidString(id) {
+		return false
+	}
+	return strings.IndexFunc(id, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsControl(r)
+	}) < 0
 }

@@ -75,7 +75,7 @@ func (c Client) request(ctx context.Context, method, target string, form url.Val
 		}
 		requestID := ""
 		if values := resp.Header.Values("X-Request-Id"); len(values) == 1 {
-			requestID = safeOAuthRequestID(values[0])
+			requestID = requestIDForError(values[0])
 		}
 		return &oauthError{code: oauthResponseCategory(v.Error), status: resp.StatusCode, requestID: requestID}
 	}

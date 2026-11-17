@@ -144,7 +144,12 @@ func (c *Client) beginSignIn(ctx context.Context, clientID string) (signInSnapsh
 				return err
 			}
 		}
-		snapshot = signInSnapshot{i.HostID, i.Active, i.SelectionVersion, previous}
+		snapshot = signInSnapshot{
+			hostID:           i.HostID,
+			active:           i.Active,
+			selectionVersion: i.SelectionVersion,
+			credential:       previous,
+		}
 		return nil
 	})
 	return snapshot, err

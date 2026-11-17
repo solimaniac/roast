@@ -4,12 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
+	"regexp"
 )
 
-// Only fixed categories cross the user-visible error boundary. Provider error
-// descriptions and arbitrary code values can contain authorization data.
-// ErrorCategory returns a category safe to show to the user.
+// ErrorCategory returns a fixed category safe to show to the user. Provider
+// descriptions and arbitrary codes can contain authorization data.
 func ErrorCategory(code string) string {
 	switch code {
 	case "access_denied", "invalid_request", "invalid_client", "unauthorized_client",
@@ -37,17 +36,11 @@ func oauthResponseCategory(raw json.RawMessage) string {
 	return ErrorCategory(*nested.Code)
 }
 
-// OpenAI's OAuth SDK reads x-request-id. Accept only its recognizable req_
-// identifier form, with a bounded ASCII suffix; omit unfamiliar values rather
-// than echo arbitrary header text. Never obtain identifiers from callback data.
-func safeOAuthRequestID(id string) string {
-	if !strings.HasPrefix(id, "req_") || len(id) < 12 || len(id) > 128 {
-		return ""
-	}
-	for _, ch := range id[4:] {
-		if ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '_' || ch == '-' {
-			continue
-		}
+var requestIDPattern = regexp.MustCompile(`^req_[A-Za-z0-9_-]{8,124}$`)
+
+// requestIDForError omits unfamiliar header values instead of echoing provider data.
+func requestIDForError(id string) string {
+	if !requestIDPattern.MatchString(id) {
 		return ""
 	}
 	return id
@@ -70,7 +63,7 @@ func (e *oauthError) Is(target error) bool {
 }
 func (e *oauthError) Error() string {
 	message := fmt.Sprintf("ChatGPT OAuth request failed (HTTP %d, %s)", e.status, ErrorCategory(e.code))
-	if requestID := safeOAuthRequestID(e.requestID); requestID != "" {
+	if requestID := requestIDForError(e.requestID); requestID != "" {
 		message += "; request ID " + requestID
 	}
 	if errors.Is(e, ErrNetwork) {

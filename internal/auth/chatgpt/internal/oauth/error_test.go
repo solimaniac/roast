@@ -77,3 +77,36 @@ func TestMalformedOAuthErrorDoesNotRetainTerminalCategory(t *testing.T) {
 		}
 	}
 }
+
+func TestRequestIDForError(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		id   string
+		want bool
+	}{
+		{"empty", "", false},
+		{"11 bytes", "req_" + strings.Repeat("a", 7), false},
+		{"12 bytes", "req_" + strings.Repeat("a", 8), true},
+		{"128 bytes", "req_" + strings.Repeat("a", 124), true},
+		{"129 bytes", "req_" + strings.Repeat("a", 125), false},
+		{"ASCII letters digits and separators", "req_aZ09_-ab", true},
+		{"wrong prefix", "REQ_12345678", false},
+		{"unicode", "req_1234567é", false},
+		{"space", "req_1234 5678", false},
+		{"newline", "req_12345678\n", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			want := ""
+			if tt.want {
+				want = tt.id
+			}
+			if got := requestIDForError(tt.id); got != want {
+				t.Errorf("requestIDForError(%q) = %q, want %q", tt.id, got, want)
+			}
+			message := (&oauthError{status: http.StatusBadRequest, code: "invalid_grant", requestID: tt.id}).Error()
+			if strings.Contains(message, "; request ID ") != tt.want {
+				t.Errorf("error presentation bypassed request ID validation: %q", message)
+			}
+		})
+	}
+}
