@@ -16,9 +16,7 @@ func TestTransientOAuthFailurePreservesRefreshCredentials(t *testing.T) {
 			c := testClient(t)
 			seed(t, c, time.Now().Add(-time.Minute))
 			c.provider.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
-				r := response(map[string]string{"error": "invalid_grant"})
-				r.StatusCode = status
-				return r, nil
+				return jsonResponse(status, map[string]string{"error": "invalid_grant"})
 			})
 			if token, err := c.Token(context.Background()); token != "" || !errors.Is(err, ErrNetwork) {
 				t.Fatalf("transient response misclassified: %v", err)
@@ -35,9 +33,7 @@ func TestBareUnauthorizedDoesNotEraseCredentials(t *testing.T) {
 	c := testClient(t)
 	seed(t, c, time.Now().Add(-time.Minute))
 	c.provider.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
-		r := response(map[string]string{"error": "unknown"})
-		r.StatusCode = http.StatusUnauthorized
-		return r, nil
+		return jsonResponse(http.StatusUnauthorized, map[string]string{"error": "unknown"})
 	})
 	if _, err := c.Token(context.Background()); !errors.Is(err, ErrAuth) {
 		t.Fatalf("wrong classification: %v", err)

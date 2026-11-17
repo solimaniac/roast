@@ -21,7 +21,9 @@ func TestPrivateFilesAndLockCancellation(t *testing.T) {
 		if _, e := c.Token(context.Background()); e == nil {
 			t.Fatal("accepted public credential")
 		}
-		_ = os.Chmod(c.path(c.selected), 0600)
+		if err := os.Chmod(c.path(c.selected), 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	err := storage.WithLock(context.Background(), c.dir, "session", func() error {
@@ -36,6 +38,7 @@ func TestPrivateFilesAndLockCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
 func TestLockReleaseAndStablePreparedHost(t *testing.T) {
 	c := testClient(t)
 	id, dir, err := c.PrepareHost(context.Background())
@@ -46,7 +49,10 @@ func TestLockReleaseAndStablePreparedHost(t *testing.T) {
 	if err != nil || id != second {
 		t.Fatal("host identity changed")
 	}
-	i, _ := c.loadIndex()
+	i, err := c.loadIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(i.Clients) != 0 || i.Active != "" {
 		t.Fatal("prepare-host created registration")
 	}

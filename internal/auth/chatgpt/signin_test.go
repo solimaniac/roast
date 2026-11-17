@@ -20,9 +20,11 @@ func TestSignInCallbackAndPKCE(t *testing.T) {
 	c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
 		switch r.URL.String() {
 		case jwksURL:
-			return response(jwks(k)), nil
+			return jsonResponse(http.StatusOK, jwks(k))
 		case tokenURL:
-			_ = r.ParseForm()
+			if err := r.ParseForm(); err != nil {
+				return nil, err
+			}
 			if r.Form.Get("client_id") != "oaiapp_test" || r.Form.Get("redirect_uri") != redirect || r.Form.Get("resource") != oauth.APIBaseURL {
 				t.Error("incorrect exchange")
 			}
@@ -30,14 +32,17 @@ func TestSignInCallbackAndPKCE(t *testing.T) {
 			if base64.RawURLEncoding.EncodeToString(sum[:]) != challenge {
 				t.Error("PKCE mismatch")
 			}
-			return response(oauth.TokenResponse{AccessToken: "access", RefreshToken: "refresh", IDToken: signed(t, k, claims(nonce)), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600}), nil
+			return jsonResponse(http.StatusOK, oauth.TokenResponse{AccessToken: "access", RefreshToken: "refresh", IDToken: signed(t, k, claims(nonce)), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600})
 		default:
 			t.Fatal("unexpected destination")
 			return nil, nil
 		}
 	})
 	e := c.SignIn(context.Background(), "", func(raw string) error {
-		u, _ := url.Parse(raw)
+		u, err := url.Parse(raw)
+		if err != nil {
+			return err
+		}
 		q := u.Query()
 		if q.Get("client_id") != "dynamic_agent_client" || q.Get("scope") != oauth.Scope || q.Get("agent_name_hint") != "Roast" || q.Get("ext_agent_host_id") == "" {
 			t.Error("incorrect authorization")
@@ -48,7 +53,10 @@ func TestSignInCallbackAndPKCE(t *testing.T) {
 		if !strings.HasPrefix(redirect, "http://127.0.0.1:") {
 			t.Error("not loopback")
 		}
-		callback, _ := url.Parse(redirect)
+		callback, err := url.Parse(redirect)
+		if err != nil {
+			return err
+		}
 		bad := url.Values{"state": {"wrong"}, "code": {"bad"}}
 		callback.RawQuery = bad.Encode()
 		res, e := http.Get(callback.String())
@@ -78,23 +86,27 @@ func TestSignInCallbackAndPKCE(t *testing.T) {
 		t.Fatal("identity not stored")
 	}
 }
+
 func TestIdentityOnlyAndExplicitConsent(t *testing.T) {
 	c := testClient(t)
 	key := signingKey(t)
 	var nonce string
 	c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.String() == jwksURL {
-			return response(jwks(key)), nil
+			return jsonResponse(http.StatusOK, jwks(key))
 		}
 		if r.URL.String() != tokenURL {
 			t.Fatal("wrong target")
 		}
-		return response(oauth.TokenResponse{IDToken: signed(t, key, claims(nonce)), Scope: scopeValue("openid profile email")}), nil
+		return jsonResponse(http.StatusOK, oauth.TokenResponse{IDToken: signed(t, key, claims(nonce)), Scope: scopeValue("openid profile email")})
 	})
 	run := func(enable bool) {
 		t.Helper()
 		show := func(raw string) error {
-			u, _ := url.Parse(raw)
+			u, err := url.Parse(raw)
+			if err != nil {
+				return err
+			}
 			q := u.Query()
 			nonce = q.Get("nonce")
 			if (q.Get("prompt") == "consent") != enable {
@@ -106,7 +118,10 @@ func TestIdentityOnlyAndExplicitConsent(t *testing.T) {
 			if enable && (q.Get("client_id") != "oaiapp_test" || q.Get("agent_name_hint") != "") {
 				t.Error("reauthorization recreated client")
 			}
-			callback, _ := url.Parse(q.Get("redirect_uri"))
+			callback, err := url.Parse(q.Get("redirect_uri"))
+			if err != nil {
+				return err
+			}
 			callback.RawQuery = url.Values{"code": {"code"}, "state": {q.Get("state")}, "client_id": {"oaiapp_test"}}.Encode()
 			r, e := http.Get(callback.String())
 			if e == nil {
@@ -139,6 +154,7 @@ func TestIdentityOnlyAndExplicitConsent(t *testing.T) {
 	}
 	run(true)
 }
+
 func TestFailedInitialExchangePreservesPendingRegistration(t *testing.T) {
 	c := testClient(t)
 	key := signingKey(t)
@@ -153,25 +169,28 @@ func TestFailedInitialExchangePreservesPendingRegistration(t *testing.T) {
 	exchanges := 0
 	c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.String() == jwksURL {
-			return response(jwks(key)), nil
+			return jsonResponse(http.StatusOK, jwks(key))
 		}
 		if r.URL.String() != tokenURL {
 			t.Fatal("unexpected OAuth destination")
 		}
 		exchanges++
-		_ = r.ParseForm()
+		if err := r.ParseForm(); err != nil {
+			return nil, err
+		}
 		if r.Form.Get("client_id") != "oaiapp_test" {
 			t.Error("exchange did not retain issued client ID")
 		}
 		if exchanges == 1 {
-			res := response(map[string]string{"error": "invalid_grant"})
-			res.StatusCode = http.StatusBadRequest
-			return res, nil
+			return jsonResponse(http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
 		}
-		return response(oauth.TokenResponse{AccessToken: "access", RefreshToken: "refresh", IDToken: signed(t, key, claims(nonce)), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600}), nil
+		return jsonResponse(http.StatusOK, oauth.TokenResponse{AccessToken: "access", RefreshToken: "refresh", IDToken: signed(t, key, claims(nonce)), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600})
 	})
 	show := func(raw string) error {
-		u, _ := url.Parse(raw)
+		u, err := url.Parse(raw)
+		if err != nil {
+			return err
+		}
 		q := u.Query()
 		nonce = q.Get("nonce")
 		expected := "dynamic_agent_client"
@@ -184,7 +203,10 @@ func TestFailedInitialExchangePreservesPendingRegistration(t *testing.T) {
 		if q.Get("client_id") != expected || q.Get("ext_agent_host_id") != "stable-host" {
 			t.Error("retry changed registration or host")
 		}
-		callback, _ := url.Parse(q.Get("redirect_uri"))
+		callback, err := url.Parse(q.Get("redirect_uri"))
+		if err != nil {
+			return err
+		}
 		callback.RawQuery = url.Values{"code": {"code"}, "state": {q.Get("state")}, "client_id": {"oaiapp_test"}}.Encode()
 		res, err := http.Get(callback.String())
 		if err == nil {
@@ -213,11 +235,15 @@ func TestFailedInitialExchangePreservesPendingRegistration(t *testing.T) {
 	if err != nil || verified.PendingRegistration || verified.Subject != "subject" || verified.AccessToken == "" {
 		t.Fatal("pending registration did not complete identity validation")
 	}
-	i, _ = c.loadIndex()
+	i, err = c.loadIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if i.Active != "oaiapp_test" || i.HostID != "stable-host" || exchanges != 2 {
 		t.Fatal("retry did not retain registration and host")
 	}
 }
+
 func TestIssuedClientIDOpaqueCallback(t *testing.T) {
 	for _, tt := range []struct {
 		id    string
@@ -231,18 +257,24 @@ func TestIssuedClientIDOpaqueCallback(t *testing.T) {
 					t.Fatal("unexpected destination")
 				}
 				exchanged = true
-				_ = r.ParseForm()
+				if err := r.ParseForm(); err != nil {
+					return nil, err
+				}
 				if r.Form.Get("client_id") != tt.id {
 					t.Error("issued ID was modified")
 				}
-				res := response(map[string]string{"error": "invalid_grant"})
-				res.StatusCode = http.StatusBadRequest
-				return res, nil
+				return jsonResponse(http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
 			})
 			err := c.SignIn(context.Background(), "", func(raw string) error {
-				u, _ := url.Parse(raw)
+				u, err := url.Parse(raw)
+				if err != nil {
+					return err
+				}
 				q := u.Query()
-				callback, _ := url.Parse(q.Get("redirect_uri"))
+				callback, err := url.Parse(q.Get("redirect_uri"))
+				if err != nil {
+					return err
+				}
 				callback.RawQuery = url.Values{"state": {q.Get("state")}, "code": {"code"}, "client_id": {tt.id}}.Encode()
 				res, e := http.Get(callback.String())
 				if e == nil {

@@ -18,13 +18,14 @@ func TestModelsCatalog(t *testing.T) {
 		if r.URL.String() != oauth.APIBaseURL+"/models" || r.Header.Get("Authorization") != "Bearer access" {
 			t.Error("incorrect catalog request")
 		}
-		return response(map[string]any{"models": []Model{{Slug: "model", DisplayName: "Example model", Visibility: "list"}}}), nil
+		return jsonResponse(http.StatusOK, map[string]any{"models": []Model{{Slug: "model", DisplayName: "Example model", Visibility: "list"}}})
 	})
 	models, err := c.Models(context.Background())
 	if err != nil || len(models) != 1 || models[0].Slug != "model" {
 		t.Fatal("catalog not parsed")
 	}
 }
+
 func TestNewDoesNotCreateCredentials(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)

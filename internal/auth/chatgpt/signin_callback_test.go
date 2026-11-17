@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -16,13 +17,32 @@ import (
 
 func startAsyncSignIn(t *testing.T, c *Client, ctx context.Context) (*url.URL, <-chan error) {
 	t.Helper()
+	ctx, cancel := context.WithCancel(ctx)
+	stopped := make(chan struct{})
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-stopped:
+		case <-time.After(3 * time.Second):
+			t.Error("sign-in goroutine did not stop during cleanup")
+		}
+	})
 	ready := make(chan string, 1)
 	done := make(chan error, 1)
-	go func() { done <- c.SignIn(ctx, "oaiapp_test", func(raw string) error { ready <- raw; return nil }) }()
+	go func() {
+		defer close(stopped)
+		done <- c.SignIn(ctx, "oaiapp_test", func(raw string) error { ready <- raw; return nil })
+	}()
 	select {
 	case raw := <-ready:
-		auth, _ := url.Parse(raw)
-		cb, _ := url.Parse(auth.Query().Get("redirect_uri"))
+		auth, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cb, err := url.Parse(auth.Query().Get("redirect_uri"))
+		if err != nil {
+			t.Fatal(err)
+		}
 		cb.RawQuery = url.Values{"state": {auth.Query().Get("state")}, "code": {"private-code-marker"}}.Encode()
 		return cb, done
 	case err := <-done:
@@ -63,62 +83,66 @@ func callbackGETResponse(t *testing.T, cb *url.URL, status int) (http.Header, st
 func TestAsyncCallbackCompleteResponseOnFailure(t *testing.T) {
 	for _, kind := range []string{"callback", "exchange"} {
 		t.Run(kind, func(t *testing.T) {
-			for range 20 {
-				c := testClient(t)
-				seed(t, c, time.Now().Add(time.Hour))
-				c.provider.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("private-network-marker") })
-				diagnostics := newSignInDiagnosticLog()
-				c.SetSignInDiagnostics(diagnostics)
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				cb, done := startAsyncSignIn(t, c, ctx)
-				q := cb.Query()
-				q.Set("error_description", `<script>alert("private-description-marker")</script>`)
-				q.Set("error_uri", "https://private-error-uri.invalid/")
-				q.Set("user_content", "private-user-content-marker")
-				if kind == "callback" {
-					q.Del("code")
-					q.Set("error", "private-error-marker")
-				}
-				cb.RawQuery = q.Encode()
-				header, body := callbackGETResponse(t, cb, 200)
-				var response bytes.Buffer
-				response.WriteString(body)
-				if err := header.Write(&response); err != nil {
-					t.Fatal(err)
-				}
-				for _, values := range q {
-					for _, value := range values {
-						if strings.Contains(response.String(), value) {
-							t.Fatal("callback response exposed request data")
+			// Repeat the response/close race, with each attempt isolated and named.
+			for attempt := range 20 {
+				t.Run(strconv.Itoa(attempt), func(t *testing.T) {
+					c := testClient(t)
+					seed(t, c, time.Now().Add(time.Hour))
+					c.provider.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("private-network-marker") })
+					diagnostics := newSignInDiagnosticLog()
+					c.SetSignInDiagnostics(diagnostics)
+					ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+					defer cancel()
+					cb, done := startAsyncSignIn(t, c, ctx)
+					q := cb.Query()
+					q.Set("error_description", `<script>alert("private-description-marker")</script>`)
+					q.Set("error_uri", "https://private-error-uri.invalid/")
+					q.Set("user_content", "private-user-content-marker")
+					if kind == "callback" {
+						q.Del("code")
+						q.Set("error", "private-error-marker")
+					}
+					cb.RawQuery = q.Encode()
+					header, body := callbackGETResponse(t, cb, 200)
+					var response bytes.Buffer
+					response.WriteString(body)
+					if err := header.Write(&response); err != nil {
+						t.Fatal(err)
+					}
+					for _, values := range q {
+						for _, value := range values {
+							if strings.Contains(response.String(), value) {
+								t.Fatal("callback response exposed request data")
+							}
 						}
 					}
-				}
-				select {
-				case err := <-done:
-					if err == nil {
-						t.Fatal("expected failure")
+					select {
+					case err := <-done:
+						if err == nil {
+							t.Fatal("expected failure")
+						}
+					case <-ctx.Done():
+						t.Fatal("sign-in stuck")
 					}
-				case <-ctx.Done():
-					t.Fatal("sign-in stuck")
-				}
-				cancel()
-				diagnostics.waitFor(t, "connection_closed")
-				text := diagnostics.String()
-				previous := -1
-				for _, event := range []string{"connection_opened", "connection_active", "callback_received", "connection_closed"} {
-					index := strings.Index(text, "chatgpt_signin:"+event+"\n")
-					if index <= previous {
-						t.Fatalf("missing or out-of-order phase: %s", event)
+					cancel()
+					diagnostics.waitFor(t, "connection_closed")
+					text := diagnostics.String()
+					previous := -1
+					for _, event := range []string{"connection_opened", "connection_active", "callback_received", "connection_closed"} {
+						index := strings.Index(text, "chatgpt_signin:"+event+"\n")
+						if index <= previous {
+							t.Fatalf("missing or out-of-order phase: %s", event)
+						}
+						previous = index
 					}
-					previous = index
-				}
-				for _, line := range strings.Split(strings.TrimSpace(text), "\n") {
-					switch line {
-					case "chatgpt_signin:listener_ready", "chatgpt_signin:connection_opened", "chatgpt_signin:connection_active", "chatgpt_signin:connection_closed", "chatgpt_signin:callback_received", "chatgpt_signin:callback_failed", "chatgpt_signin:exchange_started":
-					default:
-						t.Fatalf("non-enum diagnostic: %q", line)
+					for _, line := range strings.Split(strings.TrimSpace(text), "\n") {
+						switch line {
+						case "chatgpt_signin:listener_ready", "chatgpt_signin:connection_opened", "chatgpt_signin:connection_active", "chatgpt_signin:connection_closed", "chatgpt_signin:callback_received", "chatgpt_signin:callback_failed", "chatgpt_signin:exchange_started":
+						default:
+							t.Fatalf("non-enum diagnostic: %q", line)
+						}
 					}
-				}
+				})
 			}
 		})
 	}
@@ -203,7 +227,10 @@ func TestAsyncCallbackRejectionsAndDuplicate(t *testing.T) {
 		{http.MethodPost, cb.Host, "rejected_method"},
 		{http.MethodGet, "wrong-host.invalid", "rejected_host"},
 	} {
-		req, _ := http.NewRequest(rejection.method, cb.String(), nil)
+		req, err := http.NewRequest(rejection.method, cb.String(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 		req.Host = rejection.host
 		req.Header.Set("Authorization", "Bearer private-auth-marker")
 		req.Header.Set("Cookie", "session=private-cookie-marker")
@@ -268,6 +295,17 @@ func TestAsyncSignInCancellationReleasesLock(t *testing.T) {
 	if err := c.locked(ctx, func() error { return nil }); err != nil {
 		t.Fatalf("lock not released: %v", err)
 	}
+	// Browser waiting holds the per-account authorization lock, not the store
+	// lock above. A second sign-in must reach its browser callback for the same
+	// account; otherwise the canceled operation leaked its authorization lock.
+	retryCtx, retryCancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer retryCancel()
+	_, retryDone := startAsyncSignIn(t, c, retryCtx)
+	retryCancel()
+	if err := awaitMockSignIn(t, retryDone); !errors.Is(err, context.Canceled) {
+		t.Fatalf("second sign-in cancellation = %v, want context.Canceled", err)
+	}
+
 }
 
 // ConnState close hooks can run just after SignIn returns, and tests also read

@@ -40,7 +40,7 @@ func TestRefreshScopePresence(t *testing.T) {
 				if tc.present {
 					data["scope"] = tc.scope
 				}
-				return response(data), nil
+				return jsonResponse(http.StatusOK, data)
 			})
 			token, err := c.Token(context.Background())
 			if tc.want == oauth.Scope {
@@ -67,13 +67,13 @@ func TestOmittedRefreshScopeSurvivesPendingRecovery(t *testing.T) {
 		switch r.URL.String() {
 		case tokenURL:
 			refreshes++
-			return response(oauth.TokenResponse{AccessToken: "rotated-access", RefreshToken: "rotated-refresh", IDToken: signed(t, key, claims("")), TokenType: "Bearer", ExpiresIn: 3600}), nil
+			return jsonResponse(http.StatusOK, oauth.TokenResponse{AccessToken: "rotated-access", RefreshToken: "rotated-refresh", IDToken: signed(t, key, claims("")), TokenType: "Bearer", ExpiresIn: 3600})
 		case jwksURL:
 			fetches++
 			if fetches == 1 {
 				return nil, errors.New("temporary failure")
 			}
-			return response(jwks(key)), nil
+			return jsonResponse(http.StatusOK, jwks(key))
 		default:
 			t.Fatal("unexpected request")
 			return nil, nil

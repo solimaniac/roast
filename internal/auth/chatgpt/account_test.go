@@ -19,11 +19,15 @@ func TestSignOutKeepsRegistrationOnNetworkFailure(t *testing.T) {
 	if e == nil || !strings.Contains(e.Error(), "remote revocation was not confirmed") {
 		t.Fatal("must explain unconfirmed revocation")
 	}
-	v, _ := c.load(c.selected)
+	v, err := c.load(c.selected)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if v.AccessToken != "" || v.RefreshToken != "" || v.Subject != "subject" {
 		t.Fatal("wrong signout state")
 	}
 }
+
 func TestSelectedRegistrationPinnedAndIndependent(t *testing.T) {
 	c := testClient(t)
 	seed(t, c, time.Now().Add(time.Hour))
@@ -31,9 +35,14 @@ func TestSelectedRegistrationPinnedAndIndependent(t *testing.T) {
 	if err := c.save(other); err != nil {
 		t.Fatal(err)
 	}
-	i, _ := c.loadIndex()
+	i, err := c.loadIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
 	i.Clients = append(i.Clients, other.ClientID)
-	_ = c.saveIndex(i)
+	if err := c.saveIndex(i); err != nil {
+		t.Fatal(err)
+	}
 	if err := c.Select(context.Background(), other.ClientID); err != nil {
 		t.Fatal(err)
 	}

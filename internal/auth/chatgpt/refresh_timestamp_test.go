@@ -11,8 +11,17 @@ import (
 )
 
 func TestRefreshMetadataDoesNotDiscardRotatedCredentials(t *testing.T) {
-	for _, hint := range []any{"2026-11-09T00:00:00Z", "1794182400", "not-a-date", map[string]any{"unexpected": true}, nil} {
-		t.Run("metadata", func(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		hint any
+	}{
+		{"RFC3339", "2026-11-09T00:00:00Z"},
+		{"numeric string", "1794182400"},
+		{"invalid date", "not-a-date"},
+		{"unexpected object", map[string]any{"unexpected": true}},
+		{"null", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			c := testClient(t)
 			seed(t, c, time.Now().Add(-time.Minute))
 			key := signingKey(t)
@@ -21,13 +30,13 @@ func TestRefreshMetadataDoesNotDiscardRotatedCredentials(t *testing.T) {
 				switch r.URL.String() {
 				case tokenURL:
 					refreshes++
-					return response(map[string]any{"access_token": "rotated-access", "refresh_token": "rotated-refresh", "id_token": signed(t, key, claims("")), "token_type": "Bearer", "expires_in": 3600, "earliest_refresh_at": hint}), nil
+					return jsonResponse(http.StatusOK, map[string]any{"access_token": "rotated-access", "refresh_token": "rotated-refresh", "id_token": signed(t, key, claims("")), "token_type": "Bearer", "expires_in": 3600, "earliest_refresh_at": tc.hint})
 				case jwksURL:
 					fetches++
 					if fetches == 1 {
 						return nil, errors.New("temporary JWKS failure")
 					}
-					return response(jwks(key)), nil
+					return jsonResponse(http.StatusOK, jwks(key))
 				default:
 					t.Fatal("unexpected request")
 					return nil, nil

@@ -45,7 +45,14 @@ func TestHostIDFreshAndLegacyInitialization(t *testing.T) {
 					}
 				} else {
 					stop := errors.New("stop before browser authorization")
-					err := c.SignIn(context.Background(), "", func(raw string) error { u, _ := url.Parse(raw); id = u.Query().Get("ext_agent_host_id"); return stop })
+					err := c.SignIn(context.Background(), "", func(raw string) error {
+						u, err := url.Parse(raw)
+						if err != nil {
+							return err
+						}
+						id = u.Query().Get("ext_agent_host_id")
+						return stop
+					})
 					if !errors.Is(err, stop) {
 						t.Fatalf("signin did not reach URL presentation: %v", err)
 					}

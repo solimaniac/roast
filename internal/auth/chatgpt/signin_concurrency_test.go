@@ -32,13 +32,13 @@ func mockSignInTransport(t *testing.T, key *rsa.PrivateKey) transportFunc {
 			id := r.Form.Get("client_id")
 			cl := claims(r.Form.Get("code")) // The fake code carries the test nonce.
 			cl["aud"] = id
-			return response(oauth.TokenResponse{AccessToken: "authorized-" + id, RefreshToken: "authorized-refresh-" + id, IDToken: signed(t, key, cl), TokenType: "Bearer", ExpiresIn: 3600, Scope: scopeValue(oauth.Scope)}), nil
+			return jsonResponse(http.StatusOK, oauth.TokenResponse{AccessToken: "authorized-" + id, RefreshToken: "authorized-refresh-" + id, IDToken: signed(t, key, cl), TokenType: "Bearer", ExpiresIn: 3600, Scope: scopeValue(oauth.Scope)})
 		case jwksURL:
-			return response(jwks(key)), nil
+			return jsonResponse(http.StatusOK, jwks(key))
 		case discoveryURL:
-			return response(map[string]string{"issuer": oauth.Issuer, "revocation_endpoint": oauth.Issuer + "/revoke"}), nil
+			return jsonResponse(http.StatusOK, map[string]string{"issuer": oauth.Issuer, "revocation_endpoint": oauth.Issuer + "/revoke"})
 		case oauth.Issuer + "/revoke":
-			return response(nil), nil
+			return jsonResponse(http.StatusOK, nil)
 		default:
 			t.Error("unexpected mock OAuth request")
 			return nil, errors.New("unexpected request")
@@ -48,11 +48,20 @@ func mockSignInTransport(t *testing.T, key *rsa.PrivateKey) transportFunc {
 
 func beginMockSignIn(t *testing.T, c *Client, id string) (url.Values, <-chan error) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	t.Cleanup(cancel)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	stopped := make(chan struct{})
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-stopped:
+		case <-time.After(3 * time.Second):
+			t.Error("sign-in goroutine did not stop during cleanup")
+		}
+	})
 	ready := make(chan string, 1)
 	done := make(chan error, 1)
 	go func() {
+		defer close(stopped)
 		done <- c.SignIn(ctx, id, func(raw string) error { ready <- raw; return nil })
 	}()
 	select {
@@ -212,9 +221,11 @@ func TestSignInRejectsConcurrentCredentialChange(t *testing.T) {
 				var exchanges atomic.Int32
 				c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
 					if r.URL.String() == tokenURL {
-						_ = r.ParseForm()
+						if err := r.ParseForm(); err != nil {
+							return nil, err
+						}
 						if r.Form.Get("grant_type") == "refresh_token" {
-							return response(oauth.TokenResponse{AccessToken: "rotated-access", RefreshToken: "rotated-refresh", TokenType: "Bearer", ExpiresIn: 3600, Scope: scopeValue(oauth.Scope)}), nil
+							return jsonResponse(http.StatusOK, oauth.TokenResponse{AccessToken: "rotated-access", RefreshToken: "rotated-refresh", TokenType: "Bearer", ExpiresIn: 3600, Scope: scopeValue(oauth.Scope)})
 						}
 						exchanges.Add(1)
 						close(exchanging)

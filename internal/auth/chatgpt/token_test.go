@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -11,7 +12,6 @@ import (
 	"time"
 
 	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/oauth"
-	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/storage"
 )
 
 func TestRefreshSerializedAndRotated(t *testing.T) {
@@ -23,11 +23,13 @@ func TestRefreshSerializedAndRotated(t *testing.T) {
 		if r.URL.String() != tokenURL {
 			t.Error("wrong token target")
 		}
-		_ = r.ParseForm()
+		if err := r.ParseForm(); err != nil {
+			return nil, err
+		}
 		if r.Form.Get("refresh_token") != "refresh" || r.Form.Get("client_id") != c.selected || r.Form.Get("scope") != "" {
 			t.Error("bad refresh form")
 		}
-		return response(oauth.TokenResponse{AccessToken: "next-access", RefreshToken: "next-refresh", TokenType: "Bearer", ExpiresIn: 3600, Scope: scopeValue(oauth.Scope)}), nil
+		return jsonResponse(http.StatusOK, oauth.TokenResponse{AccessToken: "next-access", RefreshToken: "next-refresh", TokenType: "Bearer", ExpiresIn: 3600, Scope: scopeValue(oauth.Scope)})
 	})
 	var wg sync.WaitGroup
 	for range 8 {
@@ -42,47 +44,70 @@ func TestRefreshSerializedAndRotated(t *testing.T) {
 	if calls.Load() != 1 {
 		t.Fatalf("refresh called %d times", calls.Load())
 	}
-	v, e := c.load(c.selected)
-	if e != nil || v.RefreshToken != "next-refresh" {
-		t.Fatal("rotation not saved")
+
+	saved, err := c.load(c.selected)
+	if err != nil {
+		t.Fatalf("load rotated credential: %v", err)
 	}
-	var saved credential
-	if err := storage.ReadJSON(c.path(c.selected), &saved); err != nil {
-		t.Fatal(err)
+	if saved.AccessToken != "next-access" {
+		t.Errorf("persisted access token = %q, want next-access", saved.AccessToken)
 	}
+	if saved.RefreshToken != "next-refresh" {
+		t.Errorf("persisted refresh token = %q, want next-refresh", saved.RefreshToken)
+	}
+	if saved.Pending != nil {
+		t.Error("successful refresh left a pending response")
+	}
+	if saved.Subject != "subject" || saved.ClientID != c.selected {
+		t.Error("refresh changed registration identity")
+	}
+
 }
+
 func TestEarliestRefresh(t *testing.T) {
 	c := testClient(t)
-	seed(t, c, time.Now().Add(20*time.Second))
-	v, _ := c.load(c.selected)
-	v.EarliestRefreshAt = time.Now().Add(30 * time.Second).Unix()
-	_ = c.save(v)
+	now := time.Date(2026, time.November, 1, 12, 0, 0, 0, time.UTC)
+	c.now = func() time.Time { return now }
+	seed(t, c, now.Add(20*time.Second))
+	v, err := c.load(c.selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v.EarliestRefreshAt = now.Add(30 * time.Second).Unix()
+	if err := c.save(v); err != nil {
+		t.Fatal(err)
+	}
 	if _, e := c.Token(context.Background()); e != nil {
 		t.Fatal(e)
 	}
-	v.ExpiresAt = time.Now().Add(-time.Second)
-	_ = c.save(v)
+	v.ExpiresAt = now.Add(-time.Second)
+	if err := c.save(v); err != nil {
+		t.Fatal(err)
+	}
 	if _, e := c.Token(context.Background()); !errors.Is(e, ErrAuth) {
 		t.Fatalf("want auth failure: %v", e)
 	}
 }
+
 func TestTerminalRefreshClearsOnlyTokens(t *testing.T) {
 	c := testClient(t)
 	seed(t, c, time.Now().Add(-time.Minute))
 	c.provider.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
-		r := response(map[string]string{"error": "invalid_grant", "error_description": "secret should not appear"})
-		r.StatusCode = 400
-		return r, nil
+		return jsonResponse(400, map[string]string{"error": "invalid_grant", "error_description": "secret should not appear"})
 	})
 	_, e := c.Token(context.Background())
 	if !errors.Is(e, ErrAuth) || strings.Contains(e.Error(), "secret") {
 		t.Fatal("unsafe or unclassified error")
 	}
-	v, _ := c.load(c.selected)
+	v, err := c.load(c.selected)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if v.AccessToken != "" || v.RefreshToken != "" || v.Subject != "subject" {
 		t.Fatal("did not preserve registration while clearing tokens")
 	}
 }
+
 func TestNetworkErrorDoesNotClearTokens(t *testing.T) {
 	c := testClient(t)
 	seed(t, c, time.Now().Add(-time.Minute))
@@ -91,11 +116,15 @@ func TestNetworkErrorDoesNotClearTokens(t *testing.T) {
 	if !errors.Is(e, ErrNetwork) || strings.Contains(e.Error(), "secret") {
 		t.Fatal("unsafe or unclassified error")
 	}
-	v, _ := c.load(c.selected)
+	v, err := c.load(c.selected)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if v.RefreshToken == "" {
 		t.Fatal("network failure erased refresh token")
 	}
 }
+
 func TestRefreshPendingSurvivesJWKSFailure(t *testing.T) {
 	c := testClient(t)
 	seed(t, c, time.Now().Add(-time.Minute))
@@ -105,13 +134,13 @@ func TestRefreshPendingSurvivesJWKSFailure(t *testing.T) {
 		switch r.URL.String() {
 		case tokenURL:
 			refreshes++
-			return response(oauth.TokenResponse{AccessToken: "rotated-access", RefreshToken: "rotated-refresh", IDToken: signed(t, key, claims("")), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600}), nil
+			return jsonResponse(http.StatusOK, oauth.TokenResponse{AccessToken: "rotated-access", RefreshToken: "rotated-refresh", IDToken: signed(t, key, claims("")), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600})
 		case jwksURL:
 			fetches++
 			if fetches == 1 {
 				return nil, errors.New("temporary JWKS failure")
 			}
-			return response(jwks(key)), nil
+			return jsonResponse(http.StatusOK, jwks(key))
 		default:
 			t.Fatal("unexpected request")
 			return nil, nil
@@ -129,25 +158,59 @@ func TestRefreshPendingSurvivesJWKSFailure(t *testing.T) {
 	if err != nil || token != "rotated-access" || refreshes != 1 {
 		t.Fatalf("did not resume validation: refreshes=%d err=%v", refreshes, err)
 	}
-	saved, _ = c.load(c.selected)
+	saved, err = c.load(c.selected)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if saved.Pending != nil || saved.RefreshToken != "rotated-refresh" {
 		t.Fatal("pending token not committed")
 	}
 }
+
 func TestPendingWrongIdentityNeverExposed(t *testing.T) {
 	c := testClient(t)
 	seed(t, c, time.Now().Add(-time.Minute))
 	key := signingKey(t)
-	v, _ := c.load(c.selected)
+	v, err := c.load(c.selected)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cl := claims("")
 	cl["sub"] = "different"
 	v.Pending = &pendingRefresh{Response: oauth.TokenResponse{AccessToken: "wrong-account", RefreshToken: "new-refresh", IDToken: signed(t, key, cl), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600}, ReceivedAt: time.Now()}
-	_ = c.save(v)
-	c.provider.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) { return response(jwks(key)), nil })
-	if token, err := c.Token(context.Background()); err == nil || token != "" {
-		t.Fatal("unvalidated identity escaped")
+	if err := c.save(v); err != nil {
+		t.Fatal(err)
+	}
+	before, err := c.load(c.selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jwksCalls := 0
+	c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.String() != jwksURL {
+			return nil, errors.New("unexpected request instead of JWKS validation")
+		}
+		jwksCalls++
+		return jsonResponse(http.StatusOK, jwks(key))
+	})
+
+	token, err := c.Token(t.Context())
+
+	if token != "" || !errors.Is(err, ErrAuth) || !strings.Contains(err.Error(), "identity changed") {
+		t.Fatalf("Token = %q, error = %v; want no token and identity-change authentication failure", token, err)
+	}
+	if jwksCalls != 1 {
+		t.Errorf("JWKS calls = %d, want 1", jwksCalls)
+	}
+	after, err := c.load(c.selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Error("rejected identity changed stored credentials")
 	}
 }
+
 func TestPendingRefreshDelayedPastIDExpiry(t *testing.T) {
 	for _, tt := range []struct {
 		name        string
@@ -164,7 +227,10 @@ func TestPendingRefreshDelayedPastIDExpiry(t *testing.T) {
 			cl := claims("")
 			cl["iat"] = received.Unix()
 			cl["exp"] = received.Add(10 * time.Minute).Unix()
-			v, _ := c.load(c.selected)
+			v, err := c.load(c.selected)
+			if err != nil {
+				t.Fatal(err)
+			}
 			v.Pending = &pendingRefresh{Response: oauth.TokenResponse{AccessToken: "pending-access", RefreshToken: "pending-refresh", IDToken: signed(t, key, cl), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600}, ReceivedAt: received}
 			if err := c.save(v); err != nil {
 				t.Fatal(err)
@@ -173,14 +239,16 @@ func TestPendingRefreshDelayedPastIDExpiry(t *testing.T) {
 			c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
 				switch r.URL.String() {
 				case jwksURL:
-					return response(jwks(key)), nil
+					return jsonResponse(http.StatusOK, jwks(key))
 				case tokenURL:
 					refreshes++
-					_ = r.ParseForm()
+					if err := r.ParseForm(); err != nil {
+						return nil, err
+					}
 					if r.Form.Get("refresh_token") != "pending-refresh" {
 						t.Error("reused consumed refresh token")
 					}
-					return response(oauth.TokenResponse{AccessToken: "fresh-access", RefreshToken: "fresh-refresh", TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600}), nil
+					return jsonResponse(http.StatusOK, oauth.TokenResponse{AccessToken: "fresh-access", RefreshToken: "fresh-refresh", TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600})
 				default:
 					t.Fatal("unexpected request")
 					return nil, nil
@@ -209,6 +277,7 @@ func TestPendingRefreshDelayedPastIDExpiry(t *testing.T) {
 		})
 	}
 }
+
 func TestPendingRefreshRejectsInvalidReceiptOrExpiredIdentity(t *testing.T) {
 	for _, name := range []string{"zero receipt", "pre-epoch receipt", "future receipt", "expired at receipt"} {
 		t.Run(name, func(t *testing.T) {
@@ -231,7 +300,10 @@ func TestPendingRefreshRejectsInvalidReceiptOrExpiredIdentity(t *testing.T) {
 			case "expired at receipt":
 				cl["exp"] = received.Unix()
 			}
-			v, _ := c.load(c.selected)
+			v, err := c.load(c.selected)
+			if err != nil {
+				t.Fatal(err)
+			}
 			v.Pending = &pendingRefresh{Response: oauth.TokenResponse{AccessToken: "pending-access", RefreshToken: "pending-refresh", IDToken: signed(t, key, cl), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600}, ReceivedAt: received}
 			if err := c.save(v); err != nil {
 				t.Fatal(err)
@@ -240,18 +312,22 @@ func TestPendingRefreshRejectsInvalidReceiptOrExpiredIdentity(t *testing.T) {
 				if r.URL.String() != jwksURL {
 					t.Fatal("invalid pending record caused refresh")
 				}
-				return response(jwks(key)), nil
+				return jsonResponse(http.StatusOK, jwks(key))
 			})
 			if token, err := c.Token(context.Background()); token != "" || !errors.Is(err, ErrAuth) {
 				t.Fatalf("invalid receipt/identity accepted: %v", err)
 			}
-			saved, _ := c.load(c.selected)
+			saved, err := c.load(c.selected)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if saved.Pending == nil || saved.AccessToken != "access" {
 				t.Fatal("invalid pending credentials became active")
 			}
 		})
 	}
 }
+
 func TestRefreshRechecksExpiryAfterValidation(t *testing.T) {
 	for _, delay := range []time.Duration{0, time.Second, 2 * time.Second} {
 		t.Run(delay.String(), func(t *testing.T) {
@@ -280,12 +356,12 @@ func TestRefreshRechecksExpiryAfterValidation(t *testing.T) {
 						t.Fatal("reused consumed refresh token")
 					}
 					if refreshes == 1 {
-						return response(oauth.TokenResponse{AccessToken: "short-access", RefreshToken: "rotated-refresh", IDToken: signed(t, key, cl), TokenType: "Bearer", ExpiresIn: 1, Scope: scopeValue(oauth.Scope)}), nil
+						return jsonResponse(http.StatusOK, oauth.TokenResponse{AccessToken: "short-access", RefreshToken: "rotated-refresh", IDToken: signed(t, key, cl), TokenType: "Bearer", ExpiresIn: 1, Scope: scopeValue(oauth.Scope)})
 					}
-					return response(oauth.TokenResponse{AccessToken: "fresh-access", RefreshToken: "fresh-refresh", TokenType: "Bearer", ExpiresIn: 3600, Scope: scopeValue(oauth.Scope)}), nil
+					return jsonResponse(http.StatusOK, oauth.TokenResponse{AccessToken: "fresh-access", RefreshToken: "fresh-refresh", TokenType: "Bearer", ExpiresIn: 3600, Scope: scopeValue(oauth.Scope)})
 				case jwksURL:
 					now = received.Add(delay)
-					return response(jwks(key)), nil
+					return jsonResponse(http.StatusOK, jwks(key))
 				default:
 					t.Fatal("unexpected request")
 					return nil, nil

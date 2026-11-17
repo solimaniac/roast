@@ -23,10 +23,17 @@ import (
 type transportFunc func(*http.Request) (*http.Response, error)
 
 func (f transportFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-func response(v any) *http.Response {
-	b, _ := json.Marshal(v)
-	return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(string(b)))}
+
+// jsonResponse returns encoding failures through the mock transport, including
+// when the request runs on a sign-in goroutine.
+func jsonResponse(status int, value any) (*http.Response, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(string(data)))}, nil
 }
+
 func testClient(t *testing.T) *Client {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "credentials")
@@ -40,6 +47,7 @@ func testClient(t *testing.T) *Client {
 	})
 	return &Client{dir: dir, now: time.Now, provider: provider}
 }
+
 func seed(t *testing.T, c *Client, exp time.Time) {
 	t.Helper()
 	c.selected = "oaiapp_test"
@@ -50,6 +58,7 @@ func seed(t *testing.T, c *Client, exp time.Time) {
 		t.Fatal(e)
 	}
 }
+
 func signingKey(t *testing.T) *rsa.PrivateKey {
 	t.Helper()
 	k, e := rsa.GenerateKey(rand.Reader, 2048)
@@ -58,19 +67,30 @@ func signingKey(t *testing.T) *rsa.PrivateKey {
 	}
 	return k
 }
+
 func signed(t *testing.T, k *rsa.PrivateKey, claims map[string]any) string {
 	t.Helper()
 	enc := base64.RawURLEncoding.EncodeToString
-	h, _ := json.Marshal(map[string]string{"alg": "RS256", "kid": "test"})
-	p, _ := json.Marshal(claims)
+	h, err := json.Marshal(map[string]string{"alg": "RS256", "kid": "test"})
+	if err != nil {
+		t.Errorf("encode JWT header: %v", err)
+		return ""
+	}
+	p, err := json.Marshal(claims)
+	if err != nil {
+		t.Errorf("encode JWT claims: %v", err)
+		return ""
+	}
 	input := enc(h) + "." + enc(p)
 	sum := sha256.Sum256([]byte(input))
 	sig, e := rsa.SignPKCS1v15(rand.Reader, k, crypto.SHA256, sum[:])
 	if e != nil {
-		t.Fatal(e)
+		t.Errorf("sign fixture token: %v", e)
+		return ""
 	}
 	return input + "." + enc(sig)
 }
+
 func jwks(k *rsa.PrivateKey) any {
 	return map[string]any{"keys": []any{map[string]string{"kty": "RSA", "kid": "test", "alg": "RS256", "use": "sig", "n": base64.RawURLEncoding.EncodeToString(k.N.Bytes()), "e": base64.RawURLEncoding.EncodeToString(big.NewInt(int64(k.E)).Bytes())}}}
 }
