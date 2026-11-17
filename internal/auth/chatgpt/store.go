@@ -15,17 +15,6 @@ import (
 	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/storage"
 )
 
-type Account struct {
-	PendingRegistration bool      `json:"pending_registration,omitempty"`
-	ClientID            string    `json:"client_id"`
-	Subject             string    `json:"subject"`
-	Email               string    `json:"email,omitempty"`
-	Active              bool      `json:"active"`
-	SignedIn            bool      `json:"signed_in"`
-	PlanEnabled         bool      `json:"plan_enabled"`
-	ExpiresAt           time.Time `json:"expires_at"`
-}
-
 // pendingRefresh retains a rotated response until identity validation succeeds.
 type pendingRefresh struct {
 	Response   oauth.TokenResponse `json:"response"`

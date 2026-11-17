@@ -4,7 +4,19 @@ import (
 	"context"
 	"errors"
 	"os"
+	"time"
 )
+
+type Account struct {
+	PendingRegistration bool      `json:"pending_registration,omitempty"`
+	ClientID            string    `json:"client_id"`
+	Subject             string    `json:"subject"`
+	Email               string    `json:"email,omitempty"`
+	Active              bool      `json:"active"`
+	SignedIn            bool      `json:"signed_in"`
+	PlanEnabled         bool      `json:"plan_enabled"`
+	ExpiresAt           time.Time `json:"expires_at"`
+}
 
 func (c *Client) Status(ctx context.Context) ([]Account, error) {
 	if _, err := os.Lstat(c.dir); errors.Is(err, os.ErrNotExist) {
