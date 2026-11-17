@@ -1,9 +1,10 @@
 package oauth
 
 import (
-	"crypto/sha256"
-	"encoding/base64"
+	"crypto/rand"
 	"net/url"
+
+	"golang.org/x/oauth2"
 )
 
 const DynamicClientID = "dynamic_agent_client"
@@ -17,9 +18,16 @@ type Authorization struct {
 	Consent  bool
 }
 
+// NewAuthorization binds a fresh state, OIDC nonce, and PKCE verifier to one sign-in.
+func NewAuthorization(clientID, hostID string, consent bool) Authorization {
+	return Authorization{
+		ClientID: clientID, HostID: hostID, Consent: consent,
+		State: rand.Text(), Nonce: rand.Text(), Verifier: oauth2.GenerateVerifier(),
+	}
+}
+
 // URL omits any retained ID token because the URL may appear in terminal scrollback.
 func (a Authorization) URL(redirect string) string {
-	challenge := sha256.Sum256([]byte(a.Verifier))
 	query := url.Values{
 		"client_id":             {a.ClientID},
 		"ext_agent_host_id":     {a.HostID},
@@ -30,7 +38,7 @@ func (a Authorization) URL(redirect string) string {
 		"state":                 {a.State},
 		"nonce":                 {a.Nonce},
 		"code_challenge_method": {"S256"},
-		"code_challenge":        {base64.RawURLEncoding.EncodeToString(challenge[:])},
+		"code_challenge":        {oauth2.S256ChallengeFromVerifier(a.Verifier)},
 	}
 	if a.ClientID == "" {
 		query.Set("client_id", DynamicClientID)

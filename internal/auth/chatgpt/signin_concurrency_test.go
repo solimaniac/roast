@@ -107,7 +107,7 @@ func addMockAccount(t *testing.T, c *Client, id string) {
 		if err != nil {
 			return err
 		}
-		if err = c.saveCredential(credential{Account: Account{ClientID: id, Subject: "subject", ExpiresAt: time.Now().Add(time.Hour)}, AccessToken: "access-" + id, RefreshToken: "refresh-" + id, Scopes: oauth.Scope}); err != nil {
+		if err = c.saveCredential(&credential{Account: Account{ClientID: id, Subject: "subject", ExpiresAt: time.Now().Add(time.Hour)}, AccessToken: "access-" + id, RefreshToken: "refresh-" + id, Scopes: oauth.Scope}); err != nil {
 			return err
 		}
 		i.Clients = append(i.Clients, id)
@@ -678,7 +678,7 @@ func TestSelectionWritePathsUseFreshRevisions(t *testing.T) {
 						}
 						i.Active = c.selected
 						i.SelectionVersion = baseline.version
-						if err = c.saveCredential(signedIn); err != nil {
+						if err = c.saveCredential(&signedIn); err != nil {
 							return err
 						}
 						return c.saveIndex(i)

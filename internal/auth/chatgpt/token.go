@@ -4,47 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
-	"strings"
 	"time"
 
 	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/oauth"
 )
 
-const planScope = "chatgpt.tokens.use.direct"
-
-func (v credential) planEnabled() bool {
-	scopes := strings.Fields(v.Scopes)
-	return slices.Contains(scopes, planScope) && slices.Contains(scopes, "resource.invoke")
-}
-
-func (v *credential) apply(tokens oauth.TokenResponse, receivedAt time.Time) error {
-	scope := ""
-	if tokens.Scope != nil {
-		scope = *tokens.Scope
-	}
-	if tokens.AccessToken == "" {
-		if tokens.IDToken == "" {
-			return errors.New("incomplete ChatGPT token response")
-		}
-	} else if !strings.EqualFold(tokens.TokenType, "Bearer") || tokens.ExpiresIn <= 0 || tokens.ExpiresIn > 86400 {
-		return errors.New("incomplete ChatGPT token response")
-	}
-	if slices.Contains(strings.Fields(scope), planScope) && (tokens.AccessToken == "" || tokens.RefreshToken == "") {
-		return errors.New("incomplete ChatGPT plan token response")
-	}
-
-	v.AccessToken = tokens.AccessToken
-	v.RefreshToken = tokens.RefreshToken
-	v.Scopes = scope
-	v.ExpiresAt = receivedAt.Add(time.Duration(tokens.ExpiresIn) * time.Second)
-	v.EarliestRefreshAt = int64(tokens.EarliestRefreshAt)
-	if tokens.IDToken != "" {
-		v.IDToken = tokens.IDToken
-	}
-	return nil
-}
-
+// Token returns a usable plan access token for the registration pinned by New.
 func (c *Client) Token(ctx context.Context) (string, error) {
 	if c.selected == "" {
 		return "", fmt.Errorf("%w: no account selected; run roast chatgpt signin", ErrAuth)
@@ -72,11 +37,11 @@ func (c *Client) selectedToken(ctx context.Context) (string, error) {
 			return "", err
 		}
 	}
-	if v.AccessToken == "" {
+	if !v.signedIn() {
 		return "", errors.New("ChatGPT account is signed out; run roast chatgpt signin --account CLIENT_ID")
 	}
 	if !v.planEnabled() {
-		return "", errors.New("ChatGPT plan usage scope is missing; sign in again")
+		return "", fmt.Errorf("ChatGPT plan usage scope is missing; run roast chatgpt signin --account %s --enable-plan", v.ClientID)
 	}
 
 	now := c.now()
@@ -93,8 +58,8 @@ func (c *Client) refresh(ctx context.Context, v credential) (string, error) {
 	tokens, err := c.provider.Refresh(ctx, v.ClientID, v.RefreshToken)
 	if err != nil {
 		if oauth.InvalidRefreshGrant(err) {
-			v.clearTokens()
-			if err := c.saveCredential(v); err != nil {
+			v.clearGrant()
+			if err := c.saveCredential(&v); err != nil {
 				return "", err
 			}
 		}
@@ -103,7 +68,7 @@ func (c *Client) refresh(ctx context.Context, v credential) (string, error) {
 	// Rotation has consumed the old refresh token. Persist the new response
 	// before fetching JWKS so a later call can retry validation.
 	v.Pending = &pendingRefresh{Response: tokens, ReceivedAt: c.now()}
-	if err := c.saveCredential(v); err != nil {
+	if err := c.saveCredential(&v); err != nil {
 		// The provider may have consumed the old refresh token. Best-effort
 		// invalidation prevents its reuse if storage becomes writable again now.
 		return "", c.rejectPending(&v, fmt.Errorf("ChatGPT refresh completed but its replacement could not be durably saved: %w", err))
@@ -136,7 +101,7 @@ func (c *Client) acceptPending(ctx context.Context, v *credential) error {
 	if response.Scope == nil {
 		response.Scope = &v.Scopes
 	}
-	if err := next.apply(response, receivedAt); err != nil {
+	if err := next.applyTokenResponse(response, receivedAt); err != nil {
 		return c.rejectPending(v, err)
 	}
 	if response.IDToken != "" {
@@ -154,7 +119,7 @@ func (c *Client) acceptPending(ctx context.Context, v *credential) error {
 		}
 	}
 	next.Pending = nil
-	if err := c.saveCredential(next); err != nil {
+	if err := c.saveCredential(&next); err != nil {
 		return fmt.Errorf("could not persist validated ChatGPT credentials; repair credential storage and retry: %w", err)
 	}
 	*v = next
@@ -165,12 +130,8 @@ func (c *Client) acceptPending(ctx context.Context, v *credential) error {
 // nor the old, possibly consumed refresh token may be used after this point.
 // Identity and registration remain available for explicit reauthorization.
 func (c *Client) rejectPending(v *credential, cause error) error {
-	v.clearTokens()
-	v.Pending = nil
-	v.Scopes = ""
-	v.ExpiresAt = time.Time{}
-	v.EarliestRefreshAt = 0
-	if err := c.saveCredential(*v); err != nil {
+	v.clearGrant()
+	if err := c.saveCredential(v); err != nil {
 		return fmt.Errorf("%w; could not confirm local credential cleanup (%v); repair credential storage, then run roast chatgpt signin --account CLIENT_ID before retrying", cause, err)
 	}
 	return fmt.Errorf("%w; local credentials cleared; run roast chatgpt signin --account CLIENT_ID", cause)

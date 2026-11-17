@@ -73,14 +73,14 @@ func TestEarliestRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	v.EarliestRefreshAt = now.Add(30 * time.Second).Unix()
-	if err := c.saveCredential(v); err != nil {
+	if err := c.saveCredential(&v); err != nil {
 		t.Fatal(err)
 	}
 	if _, e := c.Token(context.Background()); e != nil {
 		t.Fatal(e)
 	}
 	v.ExpiresAt = now.Add(-time.Second)
-	if err := c.saveCredential(v); err != nil {
+	if err := c.saveCredential(&v); err != nil {
 		t.Fatal(err)
 	}
 	if _, e := c.Token(context.Background()); !errors.Is(e, ErrAuth) {
@@ -88,7 +88,7 @@ func TestEarliestRefresh(t *testing.T) {
 	}
 }
 
-func TestTerminalRefreshClearsOnlyTokens(t *testing.T) {
+func TestTerminalRefreshClearsGrantAndKeepsRegistration(t *testing.T) {
 	c := testClient(t)
 	seed(t, c, time.Now().Add(-time.Minute))
 	c.provider.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
@@ -102,8 +102,12 @@ func TestTerminalRefreshClearsOnlyTokens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v.AccessToken != "" || v.RefreshToken != "" || v.Subject != "subject" {
-		t.Fatal("did not preserve registration while clearing tokens")
+	if v.RefreshToken != "" || v.Scopes != "" || !v.ExpiresAt.IsZero() || v.Subject != "subject" {
+		t.Fatal("invalid grant retained credentials or lost its registration")
+	}
+	accounts, err := c.Status(t.Context())
+	if err != nil || len(accounts) != 1 || accounts[0].SignedIn || accounts[0].PlanEnabled {
+		t.Fatalf("status still reports a usable grant after invalid_grant: %v", err)
 	}
 }
 
@@ -177,7 +181,7 @@ func TestPendingWrongIdentityNeverExposed(t *testing.T) {
 	cl := claims("")
 	cl["sub"] = "different"
 	v.Pending = &pendingRefresh{Response: oauth.TokenResponse{AccessToken: "wrong-account", RefreshToken: "new-refresh", IDToken: signed(t, key, cl), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600}, ReceivedAt: time.Now()}
-	if err := c.saveCredential(v); err != nil {
+	if err := c.saveCredential(&v); err != nil {
 		t.Fatal(err)
 	}
 	before, err := c.loadCredential(c.selected)
@@ -235,7 +239,7 @@ func TestPendingRefreshDelayedPastIDExpiry(t *testing.T) {
 				t.Fatal(err)
 			}
 			v.Pending = &pendingRefresh{Response: oauth.TokenResponse{AccessToken: "pending-access", RefreshToken: "pending-refresh", IDToken: signed(t, key, cl), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600}, ReceivedAt: received}
-			if err := c.saveCredential(v); err != nil {
+			if err := c.saveCredential(&v); err != nil {
 				t.Fatal(err)
 			}
 			refreshes := 0
@@ -316,7 +320,7 @@ func TestPendingRefreshRejectsPermanentFailures(t *testing.T) {
 			case "incomplete response":
 				v.Pending.Response.TokenType = "unsupported"
 			}
-			if err := c.saveCredential(v); err != nil {
+			if err := c.saveCredential(&v); err != nil {
 				t.Fatal(err)
 			}
 			c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {

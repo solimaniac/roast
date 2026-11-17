@@ -54,7 +54,7 @@ func seed(t *testing.T, c *Client, exp time.Time) {
 	if e := c.saveIndex(index{HostID: "host", Active: c.selected, Clients: []string{c.selected}}); e != nil {
 		t.Fatal(e)
 	}
-	if e := c.saveCredential(credential{Account: Account{ClientID: c.selected, Subject: "subject", ExpiresAt: exp}, AccessToken: "access", RefreshToken: "refresh", Scopes: oauth.Scope}); e != nil {
+	if e := c.saveCredential(&credential{Account: Account{ClientID: c.selected, Subject: "subject", ExpiresAt: exp}, AccessToken: "access", RefreshToken: "refresh", Scopes: oauth.Scope}); e != nil {
 		t.Fatal(e)
 	}
 }

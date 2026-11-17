@@ -7,6 +7,7 @@ import (
 	"time"
 )
 
+// Account is the registration information that can be shown by the CLI.
 type Account struct {
 	PendingRegistration bool      `json:"pending_registration,omitempty"`
 	ClientID            string    `json:"client_id"`
@@ -18,6 +19,7 @@ type Account struct {
 	ExpiresAt           time.Time `json:"expires_at"`
 }
 
+// Status reads the saved registrations and their current local grant state.
 func (c *Client) Status(ctx context.Context) ([]Account, error) {
 	if _, err := os.Lstat(c.dir); errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -44,6 +46,7 @@ func (c *Client) Status(ctx context.Context) ([]Account, error) {
 	return out, err
 }
 
+// Select chooses the registration that future clients will use.
 func (c *Client) Select(ctx context.Context, id string) error {
 	return c.withSessionLock(ctx, func() error {
 		i, err := c.loadIndex()
@@ -57,13 +60,13 @@ func (c *Client) Select(ctx context.Context, id string) error {
 		if !v.signedIn() {
 			return errors.New("account is signed out; run roast chatgpt signin --account CLIENT_ID")
 		}
-		if err := i.setActive(id); err != nil {
-			return err
-		}
+		i.setActive(id)
 		return c.saveIndex(i)
 	})
 }
 
+// SignOut attempts revocation and clears the local grant. An empty ID selects
+// the active registration.
 func (c *Client) SignOut(ctx context.Context, id string) error {
 	return c.withSessionLock(ctx, func() error {
 		i, err := c.loadIndex()
@@ -90,16 +93,12 @@ func (c *Client) SignOut(ctx context.Context, id string) error {
 			remoteErr = c.provider.Revoke(ctx, id, refreshToken)
 		}
 
-		v.clearTokens()
-		v.Scopes = ""
-		v.Pending = nil
-		if err := c.saveCredential(v); err != nil {
+		v.clearGrant()
+		if err := c.saveCredential(&v); err != nil {
 			return err
 		}
 		if i.Active == id {
-			if err := i.setActive(""); err != nil {
-				return err
-			}
+			i.setActive("")
 			if err := c.saveIndex(i); err != nil {
 				return err
 			}
@@ -109,14 +108,4 @@ func (c *Client) SignOut(ctx context.Context, id string) error {
 		}
 		return nil
 	})
-}
-
-func (v credential) signedIn() bool {
-	return v.AccessToken != "" || v.IDToken != ""
-}
-
-func (v *credential) clearTokens() {
-	v.AccessToken = ""
-	v.RefreshToken = ""
-	v.IDToken = ""
 }

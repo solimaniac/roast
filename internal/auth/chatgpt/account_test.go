@@ -35,7 +35,7 @@ func TestSelectedRegistrationPinnedAndIndependent(t *testing.T) {
 	c := testClient(t)
 	seed(t, c, time.Now().Add(time.Hour))
 	other := credential{Account: Account{ClientID: "oaiapp_other", Subject: "another", ExpiresAt: time.Now().Add(time.Hour)}, AccessToken: "other-access", RefreshToken: "other-refresh", Scopes: oauth.Scope}
-	if err := c.saveCredential(other); err != nil {
+	if err := c.saveCredential(&other); err != nil {
 		t.Fatal(err)
 	}
 	i, err := c.loadIndex()

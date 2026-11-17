@@ -32,7 +32,7 @@ func TestPendingRefreshRetainsCheckpointWhenKeysUnavailable(t *testing.T) {
 				},
 				ReceivedAt: now,
 			}
-			if err := c.saveCredential(v); err != nil {
+			if err := c.saveCredential(&v); err != nil {
 				t.Fatal(err)
 			}
 			before, err := c.loadCredential(c.selected)

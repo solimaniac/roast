@@ -99,7 +99,7 @@ func TestOmittedRefreshScopeSurvivesPendingRecovery(t *testing.T) {
 func TestInitialTokenDoesNotInheritScopes(t *testing.T) {
 	c := testClient(t)
 	v := credential{Scopes: oauth.Scope}
-	if err := v.apply(oauth.TokenResponse{IDToken: "identity-only"}, c.now()); err != nil || v.Scopes != "" {
+	if err := v.applyTokenResponse(oauth.TokenResponse{IDToken: "identity-only"}, c.now()); err != nil || v.Scopes != "" {
 		t.Fatalf("initial authorization inherited an old grant: %v", err)
 	}
 }

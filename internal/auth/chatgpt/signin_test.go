@@ -137,8 +137,8 @@ func TestIdentityOnlyAndExplicitConsent(t *testing.T) {
 		t.Fatal("identity-only status incorrect")
 	}
 	c.selected = "oaiapp_test"
-	if token, err := c.Token(context.Background()); token != "" || !errors.Is(err, ErrAuth) {
-		t.Fatal("identity-only token allowed inference")
+	if token, err := c.Token(t.Context()); token != "" || !errors.Is(err, ErrAuth) || !strings.Contains(err.Error(), "--enable-plan") {
+		t.Fatalf("identity-only account should require plan consent: %v", err)
 	}
 	run(true)
 }
@@ -150,7 +150,7 @@ func TestFailedInitialExchangePreservesPendingRegistration(t *testing.T) {
 		t.Fatal(err)
 	}
 	existing := credential{Account: Account{ClientID: "oaiapp_existing", Subject: "existing-subject"}, AccessToken: "existing-access", Scopes: oauth.Scope}
-	if err := c.saveCredential(existing); err != nil {
+	if err := c.saveCredential(&existing); err != nil {
 		t.Fatal(err)
 	}
 	var nonce string

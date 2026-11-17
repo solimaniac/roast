@@ -86,7 +86,7 @@ func TestLegacyHostNeverMigratesWithRegistrations(t *testing.T) {
 				case "indexed":
 					i.Clients = []string{"issued-client"}
 				case "orphaned":
-					if err := c.saveCredential(credential{Account: Account{ClientID: "issued-client", Subject: "verified-subject"}}); err != nil {
+					if err := c.saveCredential(&credential{Account: Account{ClientID: "issued-client", Subject: "verified-subject"}}); err != nil {
 						t.Fatal(err)
 					}
 				}

@@ -51,27 +51,8 @@ func (c *Client) signIn(ctx context.Context, clientID string, consent bool, show
 		if err != nil {
 			return err
 		}
-		state, err := randomValue()
-		if err != nil {
-			return err
-		}
-		nonce, err := randomValue()
-		if err != nil {
-			return err
-		}
-		verifier, err := randomValue()
-		if err != nil {
-			return err
-		}
-		auth := oauth.Authorization{
-			ClientID: clientID,
-			HostID:   snapshot.hostID,
-			State:    state,
-			Nonce:    nonce,
-			Verifier: verifier,
-			Consent:  consent,
-		}
-		listener, err := loopback.Listen(state, clientID, c.signInDiagnostic)
+		auth := oauth.NewAuthorization(clientID, snapshot.hostID, consent)
+		listener, err := loopback.Listen(auth.State, clientID, c.signInDiagnostic)
 		if err != nil {
 			return err
 		}
@@ -127,20 +108,14 @@ func (c *Client) beginSignIn(ctx context.Context, clientID string) (signInSnapsh
 		// An older writer drops the revision. Write one before waiting so
 		// reselecting even the same active account remains detectable.
 		if i.SelectionVersion == 0 {
-			if err := i.setActive(i.Active); err != nil {
-				return err
-			}
+			i.setActive(i.Active)
 			if err := c.saveIndex(i); err != nil {
 				return err
 			}
 		}
 		// Older writers drop the generation even on an idempotent sign-out.
 		if clientID != "" && previous.Generation == "" {
-			if err := c.saveCredential(previous); err != nil {
-				return err
-			}
-			previous, err = c.loadCredential(clientID)
-			if err != nil {
+			if err := c.saveCredential(&previous); err != nil {
 				return err
 			}
 		}
@@ -176,7 +151,7 @@ func (c *Client) finishSignIn(ctx context.Context, snapshot signInSnapshot, auth
 
 	next := credential{Account: Account{ClientID: callback.ClientID, Subject: identity.Subject, Email: identity.Email}}
 	// Anchor the access token's lifetime to receipt of the token response.
-	if err := next.apply(tokens, receivedAt); err != nil {
+	if err := next.applyTokenResponse(tokens, receivedAt); err != nil {
 		return err
 	}
 	if err := c.commitSignIn(ctx, snapshot, previous, next); err != nil {
@@ -206,12 +181,8 @@ func (c *Client) prepareExchange(ctx context.Context, snapshot signInSnapshot, c
 		if _, err := c.loadCredential(clientID); !errors.Is(err, os.ErrNotExist) {
 			return errors.New("ChatGPT registration record already exists or is unreadable; reauthorize using --account")
 		}
-		pending := credential{Account: Account{ClientID: clientID, PendingRegistration: true}}
-		if err := c.saveCredential(pending); err != nil {
-			return err
-		}
-		previous, err = c.loadCredential(clientID)
-		if err != nil {
+		previous = credential{Account: Account{ClientID: clientID, PendingRegistration: true}}
+		if err := c.saveCredential(&previous); err != nil {
 			return err
 		}
 		current.Clients = append(current.Clients, clientID)
@@ -229,7 +200,7 @@ func (c *Client) commitSignIn(ctx context.Context, snapshot signInSnapshot, prev
 		if err := c.checkSignInSnapshot(previous); err != nil {
 			return err
 		}
-		if err := c.saveCredential(next); err != nil {
+		if err := c.saveCredential(&next); err != nil {
 			return err
 		}
 		if !slices.Contains(current.Clients, next.ClientID) {
@@ -237,9 +208,7 @@ func (c *Client) commitSignIn(ctx context.Context, snapshot signInSnapshot, prev
 		}
 		// A newer selection, sign-out, or completed sign-in wins.
 		if current.SelectionVersion == snapshot.selectionVersion && current.Active == snapshot.active {
-			if err := current.setActive(next.ClientID); err != nil {
-				return err
-			}
+			current.setActive(next.ClientID)
 		}
 		return c.saveIndex(current)
 	})
