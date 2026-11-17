@@ -7,7 +7,7 @@ contract can be agreed on first.
 
 ## Development
 
-Roast requires Go 1.27.3 or newer. Clone the repository, then run:
+Roast requires Go 1.27.4 or newer. Clone the repository, then run:
 
 ```sh
 go test -race ./...
@@ -62,6 +62,17 @@ fails on any such report. Tests read these variables before clearing the
 ambient environment, so other tests never see them. Never commit keys or paste
 them into logs.
 
+The `chatgpt` protocol has a separate opt-in test. With the account owner's
+permission, use a registration from `roast chatgpt signin` and a model slug
+from `roast chatgpt models`. The test spends plan usage on a fixed diagnostic
+prompt and a random tool result. The plan endpoint enforces no output-token
+cap, so each request has a deadline.
+
+```sh
+ROAST_LIVE_CHATGPT=1 ROAST_LIVE_CHATGPT_MODELS='<model-slug>' \
+  go test ./internal/llm -run TestLiveChatGPTTwoTurnReview -count=1 -v
+```
+
 Before opening a pull request, also check that `go mod tidy` leaves `go.mod`
 and `go.sum` unchanged, including the tool modules (run `go mod tidy` inside each
 tool directory). CI runs vulnerability, Git-history secret, and
@@ -85,7 +96,7 @@ the README whenever a public flag, environment variable, configuration field,
 artifact, data destination, or exit-code behavior changes.
 
 Pull request titles need a conventional `type:` prefix because squash merges
-turn them into release-note entries; see upstream's [Contributing](https://github.com/bluesky-social/roast#contributing) section.
+turn them into release-note entries; see the README's [Contributing](README.md#contributing) section.
 Branch protection requires the `Test and build` and `Security and licenses`
 CI checks and the PR-title check to pass, and requires a pull request to be up
 to date with `main` before it merges.
@@ -222,21 +233,3 @@ the selected module graph.
 
 Do not report vulnerabilities in a public issue. Follow [SECURITY.md](SECURITY.md)
 instead.
-
-## Direct ChatGPT plan backend checks
-
-The fork's `chatgpt` tests use mocked OAuth/JWKS and local stream fixtures. They
-must not discover credentials or start authorization as part of normal tests.
-The opt-in live test uses only the independent account created by
-`roast chatgpt signin`, sends a fixed diagnostic prompt and random tool token,
-and never sends source files:
-
-```sh
-ROAST_LIVE_CHATGPT=1 ROAST_LIVE_CHATGPT_MODELS=gpt-6.1-sol,gpt-6-astra \
-  go test ./internal/llm -run TestLiveChatGPTTwoTurnReview -count=1 -v
-```
-
-Choose account-available model slugs. This consumes ChatGPT plan usage and has
-request deadlines but no hard generation-token ceiling, as required by the
-preview. Never enable it without the account owner's authorization. Mock tests
-or an existing Codex CLI login are not evidence of live direct-route success.

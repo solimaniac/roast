@@ -25,15 +25,12 @@ the profile example in the Configure section of the Roast README
 operator supplies. A profile selects an endpoint, model, wire protocol
 (`responses`, `chat`, or `anthropic`), credential environment variable, and
 output limit. The finder and verifier may use different profiles and protocols.
-The fork's `chatgpt` protocol uses a separate official Sign in with ChatGPT
-registration and direct public Responses API calls, keeping Roast's native
-prompt and tool loop. Explicitly authorize with `roast chatgpt signin`, list
-account-available slugs with `roast chatgpt models`, then run `roast doctor` for
-live two-turn probes. Never read Codex tokens or silently use API billing.
-`max_output_tokens` is only an admission estimate here; the
-plan-usage preview rejects a hard generation cap. Raw SSE and finalized reasoning
-history are retained. Direct sign-in supports Linux, macOS, and Windows.
-A configured profile, saved login, or mock test is not a live validation.
+
+The experimental `chatgpt` protocol uses a Roast-managed OAuth registration.
+Have the user run `roast chatgpt signin` and choose a slug from
+`roast chatgpt models`. Omit endpoint, API key, and session header settings
+for this role. Reviews and `roast doctor` spend plan usage. The output-token
+setting is a local budget estimate on this route.
 
 `roast skill install` installs this skill into the shared Agent Skills location
 and any detected Claude Code or Polytoken installation. `roast skill status`

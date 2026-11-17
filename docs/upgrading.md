@@ -51,7 +51,7 @@ Releases before 1.1 read `$XDG_CONFIG_HOME/roast/config.yaml`, or
 `~/.config/roast/config.yaml` when `XDG_CONFIG_HOME` is unset, on every
 platform. Current releases use the operating system's user configuration
 directory by default, but also honor an explicitly set `XDG_CONFIG_HOME` on
-macOS. Upstream's [Config file location](https://github.com/bluesky-social/roast#config-file-location)
+macOS. The README's [Config file location](../README.md#config-file-location)
 section lists the paths and overrides. On macOS, set `XDG_CONFIG_HOME` to
 `$HOME/.config` to keep using the old path. Otherwise, on macOS and Windows the
 old and new paths differ, and Roast consults the old one only while installing
