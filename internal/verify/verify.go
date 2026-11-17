@@ -31,7 +31,7 @@ type wireVerdict struct {
 	Status               review.VerdictStatus `json:"status" jsonschema:"enum=confirmed,enum=refuted,enum=insufficient_context"`
 	Confidence           float64              `json:"confidence" jsonschema:"minimum=0,maximum=1"`
 	Grounding            string               `json:"grounding" jsonschema_description:"The exact lines / contradicting code / language-semantics fact the verdict rests on"`
-	RecalibratedSeverity review.Severity      `json:"recalibrated_severity,omitempty" jsonschema:"enum=,enum=INFO,enum=LOW,enum=MEDIUM,enum=HIGH,enum=CRITICAL" jsonschema_description:"If the finding is real but its severity is overstated, the corrected LOWER severity, justified in grounding. Leave empty to keep the finder's severity. Never raise severity."`
+	RecalibratedSeverity review.Severity      `json:"recalibrated_severity,omitempty" jsonschema:"enum=INFO,enum=LOW,enum=MEDIUM,enum=HIGH,enum=CRITICAL" jsonschema_description:"If the finding is real but its severity is overstated, the corrected LOWER severity, justified in grounding. Omit to keep the finder's severity. Never raise severity."`
 }
 
 // Deps carries external inputs to Verify so the package does not import

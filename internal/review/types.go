@@ -49,14 +49,9 @@ func ParseSeverity(s string) (Severity, bool) {
 	return "", false
 }
 
-// Finding is one claim from the finder. Field order matters in the wire
-// schema: reasoning first — committing to the justification before the
-// verdict measurably improves constrained-decode quality.
-//
-// No omitempty on any schema-bearing field: strict-mode JSON schema
-// requires every property in `required`, and invopop/jsonschema silently
-// demotes omitempty fields out of it. Optional-ness is expressed as
-// empty-string/empty-slice values, exactly as in v2.
+// Finding is one claim in a report. Its schema tags describe report values,
+// including empty strings for unset fields. Provider tools use WireFinding
+// instead, which excludes post-hoc fields and has its own model-facing schema.
 type Finding struct {
 	Reasoning        string   `json:"reasoning"`
 	Severity         Severity `json:"severity" jsonschema:"enum=INFO,enum=LOW,enum=MEDIUM,enum=HIGH,enum=CRITICAL"`
@@ -101,6 +96,8 @@ const (
 // The verifier sees the claim + the code ONLY — never the finder's
 // reasoning (anti-anchoring). A refuted verdict counts only when
 // Grounding cites the specific code/guard/semantics that kills the claim.
+// Its schema tags describe report values; the verifier's model-facing schema
+// is defined separately.
 type Verdict struct {
 	Reasoning            string        `json:"reasoning"`
 	Status               VerdictStatus `json:"status" jsonschema:"enum=confirmed,enum=refuted,enum=insufficient_context"`

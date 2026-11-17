@@ -86,6 +86,37 @@ func TestRecord_WritesJSONL(t *testing.T) {
 	}
 }
 
+func TestFindingSpillUsesReportCategory(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("ROAST_RECORD_DIR", dir)
+	spill := OpenFindingSpill("category-test")
+	if spill == nil {
+		t.Fatal("no finding sink")
+	}
+	for _, category := range []string{"none", "security"} {
+		spill(review.WireFinding{FrontendCategory: category})
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "runs", "category-test", "findings.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d entries, want 2", len(lines))
+	}
+	for i, want := range []string{"", "security"} {
+		var entry struct {
+			Finding review.WireFinding `json:"finding"`
+		}
+		if err := json.Unmarshal([]byte(lines[i]), &entry); err != nil {
+			t.Fatal(err)
+		}
+		if entry.Finding.FrontendCategory != want {
+			t.Errorf("entry %d category = %q, want %q", i, entry.Finding.FrontendCategory, want)
+		}
+	}
+}
+
 func TestRecord_PromptPacks(t *testing.T) {
 	dir := t.TempDir()
 	defer setDir(t, dir)()

@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.4.8 (2026-11-17)
+
+## What's Changed
+* fix(deps): update go dependencies by @renovate[bot] in https://github.com/bluesky-social/roast/pull/172
+
+
+**Full Changelog**: https://github.com/bluesky-social/roast/compare/v1.4.7...v1.4.8
+
+## 1.4.7 (2026-11-16)
+
+## What's Changed
+* chore(renovate): drop the gitleaks lipgloss major rule by @amckinley in https://github.com/bluesky-social/roast/pull/165
+* fix(deps): update module charm.land/fantasy to v0.48.0 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/164
+* fix(deps): update go dependencies by @renovate[bot] in https://github.com/bluesky-social/roast/pull/167
+* fix(deps): update golang:1.27.4 docker digest to 5e8afd4 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/168
+* chore(deps): update dependency goreleaser/goreleaser to v2.20.2 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/169
+* fix(deps): update module google.golang.org/api to v0.314.0 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/170
+* fix: support review schemas on more providers by @gsora in https://github.com/bluesky-social/roast/pull/160
+* fix(deps): update module charm.land/fantasy to v0.48.1 by @renovate[bot] in https://github.com/bluesky-social/roast/pull/171
+
+## New Contributors
+* @gsora made their first contribution in https://github.com/bluesky-social/roast/pull/160
+
+**Full Changelog**: https://github.com/bluesky-social/roast/compare/v1.4.6...v1.4.7
+
 ## 1.4.6 (2026-11-14)
 
 ## What's Changed

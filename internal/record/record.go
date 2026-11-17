@@ -140,13 +140,17 @@ func OpenFindingSpill(runID string) func(review.WireFinding) {
 	}
 	path := filepath.Join(runDir, "findings.jsonl")
 	return func(wf review.WireFinding) {
+		finding := wf.ToFinding()
+		// The spill is a report artifact, so keep its category in report form
+		// instead of exposing the model-facing sentinel.
+		wf.FrontendCategory = finding.FrontendCategory
 		line := struct {
 			TS          string             `json:"ts"`
 			Fingerprint string             `json:"fingerprint"`
 			Finding     review.WireFinding `json:"finding"`
 		}{
 			TS:          time.Now().UTC().Format(time.RFC3339Nano),
-			Fingerprint: review.Fingerprint(wf.ToFinding()),
+			Fingerprint: review.Fingerprint(finding),
 			Finding:     wf,
 		}
 		b, err := json.Marshal(line)

@@ -96,6 +96,22 @@ func confirmedWire() wireVerdict {
 	}
 }
 
+func TestVerdictSeverityWireSchemaAllowsOmissionWithoutEmptyEnum(t *testing.T) {
+	schema := reflectWireVerdictSchema()
+	for _, name := range schema["required"].([]any) {
+		if name == "recalibrated_severity" {
+			t.Fatal("recalibrated severity must be optional")
+		}
+	}
+	properties := schema["properties"].(map[string]any)
+	severity := properties["recalibrated_severity"].(map[string]any)
+	for _, value := range severity["enum"].([]any) {
+		if value == "" {
+			t.Fatal("recalibrated severity enum contains an empty value")
+		}
+	}
+}
+
 func recalibratedWire(sev review.Severity) wireVerdict {
 	return wireVerdict{
 		Reasoning:            "confirmed but overstated",

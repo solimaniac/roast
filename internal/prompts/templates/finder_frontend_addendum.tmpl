@@ -11,4 +11,4 @@ Do NOT flag anything that requires a running browser to observe: color contrast,
 
 You have `read_file`/`grep_repo` available — for a finding that depends on a component's actual reactivity (e.g. confirming a value is not memoized elsewhere, or that a prop really is unstable across renders), use them before emitting the finding rather than guessing.
 
-Set the `frontend_category` field on every finding produced by this addendum: `security` for item 2, `a11y` for item 3, `ts` for item 4, `perf` for item 5, and `hooks` for the React-hooks guidance (if provided separately). Item 1 (rendering) and any finding unrelated to this addendum leave `frontend_category` empty.
+Set the `frontend_category` field on every finding produced by this addendum: `security` for item 2, `a11y` for item 3, `ts` for item 4, `perf` for item 5, and `hooks` for the React-hooks guidance (if provided separately). For item 1 (rendering) and any finding unrelated to this addendum, set `frontend_category` to `none`.

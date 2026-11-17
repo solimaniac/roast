@@ -118,6 +118,35 @@ var goodWireFinding = WireFinding{
 	FixedCode:   "x := 2",
 }
 
+func TestFrontendCategoryWireSchemaAndConversion(t *testing.T) {
+	for _, category := range []string{"none", "", "security"} {
+		got := (WireFinding{FrontendCategory: category}).ToFinding().FrontendCategory
+		want := category
+		if category == "none" {
+			want = ""
+		}
+		if got != want {
+			t.Errorf("category %q converted to %q, want %q", category, got, want)
+		}
+	}
+
+	schema := reflectSchema(&FindingsResponse{})
+	properties := schema["properties"].(map[string]any)
+	findings := properties["findings"].(map[string]any)
+	item := findings["items"].(map[string]any)
+	category := item["properties"].(map[string]any)["frontend_category"].(map[string]any)
+	seenNone := false
+	for _, value := range category["enum"].([]any) {
+		if value == "" {
+			t.Fatal("frontend category enum contains an empty value")
+		}
+		seenNone = seenNone || value == "none"
+	}
+	if !seenNone {
+		t.Fatal("frontend category enum must allow none for non-frontend findings")
+	}
+}
+
 func TestValidateDropReasons(t *testing.T) {
 	t.Run("all good", func(t *testing.T) {
 		resp := FindingsResponse{Assessment: AssessmentFindings, Findings: []WireFinding{goodWireFinding}}
