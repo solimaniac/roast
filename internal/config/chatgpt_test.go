@@ -136,3 +136,32 @@ func TestCodexCLIProtocolRejected(t *testing.T) {
 		t.Fatal("Codex CLI protocol accepted; no implicit inference fallback is allowed")
 	}
 }
+
+func TestSwitchFromChatGPTUsesTheAPIKeyProvidersEndpoint(t *testing.T) {
+	const gateway = "https://gateway.example/v1"
+	t.Setenv("OPENAI_BASE_URL", gateway)
+	t.Setenv("OPENAI_API_KEY", "gateway-key")
+	cfg := Defaults()
+	cfg.InferenceProfiles["finder"] = InferenceProfile{Protocol: "chatgpt", Model: "test", MaxOutputTokens: 128}
+	for _, source := range []string{"flag", "environment"} {
+		t.Run(source, func(t *testing.T) {
+			protocol := "responses"
+			if source == "environment" {
+				t.Setenv("ROAST_FINDER_PROTOCOL", protocol)
+			}
+			role, err := cfg.ResolveRole("finder")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if source == "flag" {
+				role = OverrideEndpoint("finder", role, nil, &protocol)
+			}
+			if err := ValidateRole("finder", role); err != nil {
+				t.Fatal(err)
+			}
+			if role.BaseURL != gateway || role.APIKey != "gateway-key" || role.Credential.Kind != CredentialProviderEnv {
+				t.Fatalf("switching from ChatGPT should use the endpoint paired with OPENAI_API_KEY, got %s", role.BaseURL)
+			}
+		})
+	}
+}

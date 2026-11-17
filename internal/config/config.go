@@ -102,6 +102,14 @@ type CredentialSource struct {
 	Withheld string
 }
 
+func (s CredentialSource) isExplicit() bool {
+	switch s.Kind {
+	case CredentialRoleEnv, CredentialProfileEnv, CredentialProfileKey:
+		return true
+	}
+	return false
+}
+
 func (s CredentialSource) String() string {
 	switch s.Kind {
 	case CredentialChatGPTLogin:
@@ -518,10 +526,8 @@ func normalizeProfile(name string, profile InferenceProfile) (InferenceProfile, 
 	if profile.MaxOutputTokens == 0 {
 		profile.MaxOutputTokens = 32768
 	}
-	if profile.Protocol == "chatgpt" {
-		if profile.BaseURL != "" || profile.APIKey != "" || profile.APIKeyEnv != "" || profile.SessionHeader != "" {
-			return InferenceProfile{}, fmt.Errorf("inference_profiles.%s: %s requires no endpoint, api_key, api_key_env, or session_header", name, profile.Protocol)
-		}
+	if profile.Protocol == "chatgpt" && profile.hasHTTPSettings() {
+		return InferenceProfile{}, fmt.Errorf("inference_profiles.%s: chatgpt requires no endpoint, api_key, api_key_env, or session_header", name)
 	}
 	if profile.APIKey != "" && profile.APIKeyEnv != "" {
 		return InferenceProfile{}, fmt.Errorf("inference_profiles.%s cannot set both api_key and api_key_env", name)
@@ -581,6 +587,10 @@ func (p InferenceProfile) Endpoint() string {
 		return p.BaseURL
 	}
 	return DefaultBaseURL(p.Protocol)
+}
+
+func (p InferenceProfile) hasHTTPSettings() bool {
+	return p.BaseURL != "" || p.APIKey != "" || p.APIKeyEnv != "" || p.SessionHeader != ""
 }
 
 // DescribeEndpoint states where the profile sends requests, including the
@@ -652,7 +662,7 @@ func (c Config) resolveProfile(roleName, profileName string, selection Role) (Re
 	if err != nil {
 		return ResolvedRole{}, err
 	}
-	if role.Protocol == "chatgpt" && (profile.BaseURL != "" || profile.APIKey != "" || profile.APIKeyEnv != "" || profile.SessionHeader != "" || os.Getenv(roleEnvPrefix(roleName)+"BASE_URL") != "" || os.Getenv(roleEnvPrefix(roleName)+"API_KEY") != "") {
+	if role.Protocol == "chatgpt" && (profile.hasHTTPSettings() || role.ExplicitEndpoint || os.Getenv(roleEnvPrefix(roleName)+"API_KEY") != "") {
 		return ResolvedRole{}, fmt.Errorf("%s: %s does not accept endpoints, API keys, or session headers", roleName, role.Protocol)
 	}
 	role.APIKey, role.Credential = resolveCredential(roleName, profile, role, crossedProvider)
@@ -746,8 +756,11 @@ func applyEndpointOverrides(role *ResolvedRole, baseURL, protocol *string) bool 
 	crossedProvider := false
 	if protocol != nil {
 		previous := DefaultBaseURL(role.Protocol)
+		// ChatGPT shares OpenAI's public URL but has its own credential and
+		// endpoint policy. Rebind in both directions when crossing that boundary.
+		changedLogin := (role.Protocol == "chatgpt") != (*protocol == "chatgpt")
 		role.Protocol = *protocol
-		if next := DefaultBaseURL(*protocol); next != previous || *protocol == "chatgpt" {
+		if next := DefaultBaseURL(*protocol); next != previous || changedLogin {
 			switch {
 			case !role.ExplicitEndpoint:
 				role.BaseURL = implicitEndpoint(*protocol)
@@ -769,7 +782,8 @@ func applyEndpointOverrides(role *ResolvedRole, baseURL, protocol *string) bool 
 // the same rules as ROAST_<ROLE>_BASE_URL and ROAST_<ROLE>_PROTOCOL, then
 // re-resolves the credential. A nil override is unset.
 func OverrideEndpoint(roleName string, role ResolvedRole, baseURL, protocol *string) ResolvedRole {
-	return rebindCredential(roleName, role, applyEndpointOverrides(&role, baseURL, protocol))
+	crossedProvider := applyEndpointOverrides(&role, baseURL, protocol)
+	return rebindCredential(roleName, role, crossedProvider)
 }
 
 // rebindCredential re-resolves a role's credential after its endpoint or
@@ -778,29 +792,22 @@ func OverrideEndpoint(roleName string, role ResolvedRole, baseURL, protocol *str
 // against the new endpoint and protocol. When crossedProvider is true, the
 // profile's credential stays with the provider it was configured for.
 func rebindCredential(roleName string, role ResolvedRole, crossedProvider bool) ResolvedRole {
-	if role.Protocol == "chatgpt" {
-		if value := os.Getenv(roleEnvPrefix(roleName) + "API_KEY"); value != "" {
-			role.APIKey, role.Credential = value, CredentialSource{Kind: CredentialRoleEnv, Env: roleEnvPrefix(roleName) + "API_KEY"}
-			return role
-		}
-		if role.Credential.Kind == CredentialProfileEnv || role.Credential.Kind == CredentialProfileKey || role.Credential.Kind == CredentialRoleEnv {
-			return role
-		}
-		if role.APIKey == "" || role.Credential.Kind == CredentialProviderEnv {
-			role.APIKey, role.Credential = ambientCredential(role.Protocol, role.BaseURL)
-		}
+	// Keep explicitly supplied keys visible so ValidateRole can reject them
+	// for managed login. An ambient provider key can be replaced safely.
+	if role.Protocol == "chatgpt" && role.APIKey != "" && role.Credential.Kind != CredentialProviderEnv {
 		return role
 	}
 	switch role.Credential.Kind {
 	case CredentialRoleEnv:
 		return role
 	case CredentialProfileEnv, CredentialProfileKey:
-		if !crossedProvider {
+		if !crossedProvider || role.Protocol == "chatgpt" {
 			return role
 		}
 	}
-	if value := os.Getenv(roleEnvPrefix(roleName) + "API_KEY"); value != "" {
-		role.APIKey, role.Credential = value, CredentialSource{Kind: CredentialRoleEnv, Env: roleEnvPrefix(roleName) + "API_KEY"}
+	roleVar := roleEnvPrefix(roleName) + "API_KEY"
+	if value := os.Getenv(roleVar); value != "" {
+		role.APIKey, role.Credential = value, CredentialSource{Kind: CredentialRoleEnv, Env: roleVar}
 		return role
 	}
 	role.APIKey, role.Credential = ambientCredential(role.Protocol, role.BaseURL)
@@ -948,7 +955,7 @@ func ValidateRole(name string, role ResolvedRole) error {
 		return fmt.Errorf("%s model is not configured (set inference_profiles.%s.model or ROAST_%s_MODEL)", name, role.Profile, strings.ToUpper(name))
 	}
 	if role.Protocol == "chatgpt" {
-		if role.APIKey != "" || role.ExplicitEndpoint || role.SessionHeader != "" || role.Credential.Kind == CredentialProfileEnv || role.Credential.Kind == CredentialProfileKey || role.Credential.Kind == CredentialRoleEnv {
+		if role.APIKey != "" || role.ExplicitEndpoint || role.SessionHeader != "" || role.Credential.isExplicit() {
 			return fmt.Errorf("%s: %s does not accept endpoints, API keys, or session headers", name, role.Protocol)
 		}
 		return validateEndpoint(name, role.BaseURL, role.Protocol, role.MaxOutputTokens)

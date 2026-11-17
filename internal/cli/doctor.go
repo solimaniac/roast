@@ -99,45 +99,36 @@ func doctorChecks(ctx context.Context, configPath string) []doctorResult {
 	}
 	results = append(results, doctorResult{"config", doctorPass, fmt.Sprintf("schema version %d", cfg.Version)})
 
-	// Resolve both roles before running either, so a direct verifier is pinned
-	// before even a non-ChatGPT finder's checks can observe a selection change.
-	names := []string{"finder", "verifier"}
-	roles := make([]config.ResolvedRole, len(names))
-	roleErrors := make([]error, len(names))
+	// Pin the account before either probe, including when only the verifier
+	// uses ChatGPT and the account changes during the finder probe.
+	roles := []struct {
+		name string
+		role config.ResolvedRole
+		err  error
+	}{{name: "finder"}, {name: "verifier"}}
 	usesChatGPT := false
-	for i, name := range names {
-		role, resolveErr := cfg.ResolveRole(name)
-		if resolveErr == nil && name == "finder" {
-			flip, flipErr := cfg.ResolveFinderFlip(role, config.AuthorModel())
-			resolveErr = flipErr
-			role = flip.Role
+	for i := range roles {
+		check := &roles[i]
+		check.role, check.err = cfg.ResolveRole(check.name)
+		if check.err == nil && check.name == "finder" {
+			flip, err := cfg.ResolveFinderFlip(check.role, config.AuthorModel())
+			check.role, check.err = flip.Role, err
 		}
-		roles[i], roleErrors[i] = role, resolveErr
-		usesChatGPT = usesChatGPT || (resolveErr == nil && role.Protocol == "chatgpt")
+		if check.err == nil && check.role.Protocol == "chatgpt" {
+			usesChatGPT = true
+		}
 	}
 	if usesChatGPT {
 		ctx = llm.WithChatGPTAccount(ctx)
 	}
 	client := &http.Client{Timeout: 5 * time.Second}
-	for i, name := range names {
-		if roleErrors[i] != nil {
-			results = append(results, doctorResult{name + "-profile", doctorFail, roleErrors[i].Error()})
+	for _, check := range roles {
+		name, role := check.name, check.role
+		if check.err != nil {
+			results = append(results, doctorResult{name + "-profile", doctorFail, check.err.Error()})
 			continue
 		}
-		role := roles[i]
-		credential := doctorResult{name + "-credential", doctorPass, role.Credential.String()}
-		if role.Protocol == "chatgpt" {
-			credentialContext, cancel := context.WithTimeout(ctx, 30*time.Second)
-			err := llm.CheckChatGPTLogin(credentialContext)
-			cancel()
-			if err != nil {
-				credential.Status, credential.Detail = doctorFail, err.Error()
-			} else {
-				credential.Detail = "Roast-managed ChatGPT account has a current plan-usage grant"
-			}
-		} else if strings.TrimSpace(role.APIKey) == "" {
-			credential.Status = doctorFail
-		}
+		credential := doctorCredentialCheck(ctx, name, role)
 		results = append(results, credential)
 		if validateErr := config.ValidateRole(name, role); validateErr != nil {
 			results = append(results, doctorResult{name + "-profile", doctorFail, validateErr.Error()})
@@ -163,6 +154,22 @@ func doctorChecks(ctx context.Context, configPath string) []doctorResult {
 		results = append(results, doctorResult{"uploads", doctorPass, fmt.Sprintf("%s backend at %s", upload.Backend, upload.Endpoint)})
 	}
 	return append(results, doctorLocalChecks(ctx)...)
+}
+
+func doctorCredentialCheck(ctx context.Context, name string, role config.ResolvedRole) doctorResult {
+	check := name + "-credential"
+	if role.Protocol == "chatgpt" {
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if err := llm.CheckChatGPTLogin(ctx); err != nil {
+			return doctorResult{check, doctorFail, err.Error()}
+		}
+		return doctorResult{check, doctorPass, "Roast-managed ChatGPT account has a current plan-usage grant"}
+	}
+	if strings.TrimSpace(role.APIKey) == "" {
+		return doctorResult{check, doctorFail, role.Credential.String()}
+	}
+	return doctorResult{check, doctorPass, role.Credential.String()}
 }
 
 func doctorRoundtripCheck(ctx context.Context, name string, role config.ResolvedRole) doctorResult {
