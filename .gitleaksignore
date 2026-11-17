@@ -1,0 +1,2 @@
+# TestIDTokenValidation's historical unsigned JWT has empty claims and no signature.
+5218f61ff6f73eae10c8a36213da96b2a8dceba4:internal/auth/chatgpt/jwt_test.go:generic-api-key:57

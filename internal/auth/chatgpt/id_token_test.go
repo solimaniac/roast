@@ -1,9 +1,14 @@
 package chatgpt
 
 import (
+	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/oauth"
 )
 
 func TestIDTokenValidation(t *testing.T) {
@@ -15,7 +20,6 @@ func TestIDTokenValidation(t *testing.T) {
 		mutate   func(map[string]any)
 		nonce    string
 		wrongKey bool
-		unsigned bool
 		wantErr  bool
 	}{
 		{name: "valid", nonce: "nonce"},
@@ -32,7 +36,6 @@ func TestIDTokenValidation(t *testing.T) {
 			v["azp"] = "oaiapp_test"
 		}},
 		{name: "wrong signature", nonce: "nonce", wrongKey: true, wantErr: true},
-		{name: "unsigned token", nonce: "nonce", unsigned: true, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -54,9 +57,6 @@ func TestIDTokenValidation(t *testing.T) {
 				signing = otherKey
 			}
 			token := signed(t, signing, payload)
-			if tt.unsigned {
-				token = "eyJhbGciOiJub25lIn0.e30."
-			}
 
 			identity, err := c.provider.ValidateID(t.Context(), token, "oaiapp_test", tt.nonce, c.now)
 
@@ -67,5 +67,23 @@ func TestIDTokenValidation(t *testing.T) {
 				t.Errorf("validated subject = %q, want subject", identity.Subject)
 			}
 		})
+	}
+}
+
+func TestIDTokenRejectsUnsignedBeforeFetchingKeys(t *testing.T) {
+	c := testClient(t)
+	c.provider.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
+		t.Error("requested signing keys for an unsigned token")
+		return nil, errors.New("unexpected key request")
+	})
+	payload, err := json.Marshal(claims("nonce"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encode := base64.RawURLEncoding.EncodeToString
+	token := encode([]byte(`{"alg":"none","kid":"test"}`)) + "." + encode(payload) + "."
+	_, err = c.provider.ValidateID(t.Context(), token, "oaiapp_test", "nonce", c.now)
+	if !errors.Is(err, oauth.ErrInvalidID) {
+		t.Fatalf("ValidateID returned %v for an unsigned token", err)
 	}
 }
