@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -70,7 +71,12 @@ func (c *Client) path(id string) string {
 }
 
 func (c *Client) locked(ctx context.Context, fn func() error) error {
-	return storage.WithLock(ctx, c.dir, "session", fn)
+	return storage.WithLock(ctx, c.dir, "session", func() error {
+		if err := storage.CleanupTemps(c.dir); err != nil {
+			return fmt.Errorf("clean up interrupted ChatGPT credential writes: %w", err)
+		}
+		return fn()
+	})
 }
 
 // Authorization waits never own the session lock. Separate registration locks

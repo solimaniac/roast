@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // ReadJSON decodes an owner-only file.
@@ -27,6 +28,7 @@ func ReadJSON(path string, v any) error {
 }
 
 // WriteJSON atomically replaces a file with an owner-only JSON document.
+// Credential-store callers must hold the session lock through this call.
 func WriteJSON(path string, v any) error {
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -47,4 +49,33 @@ func WriteJSON(path string, v any) error {
 		return err
 	}
 	return commitPrivate(f.Name(), path)
+}
+
+// CleanupTemps removes abandoned atomic-write files without reading their data.
+// The caller must hold the store's session lock: all writers, including older
+// Roast versions, hold that lock until their temporary file has been removed.
+func CleanupTemps(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), ".credentials-") {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		// Never follow symlinks/reparse points or remove directories and files
+		// outside the existing private-storage boundary.
+		if err := checkPrivate(path, info, false); err != nil {
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+	}
+	return nil
 }
