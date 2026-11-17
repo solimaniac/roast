@@ -35,7 +35,7 @@ func TestOAuthErrorsExposeOnlySafeDetails(t *testing.T) {
 			c.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
 				body, err := json.Marshal(map[string]any{"error": tc.code, "error_description": "private-description-marker", "request_id": "private-body-marker"})
 				if err != nil {
-					t.Fatal(err)
+					return nil, err
 				}
 				r := &http.Response{StatusCode: http.StatusBadRequest, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(body))}
 				for _, id := range tc.headers {
@@ -60,14 +60,20 @@ func TestOAuthErrorsExposeOnlySafeDetails(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestOAuthErrorConstructionSanitizesDetails(t *testing.T) {
 	// Validate at the output boundary too, not merely during network parsing.
 	unsafe := &oauthError{code: "private-code-marker", status: 400, requestID: "private-header-marker"}
 	if strings.Contains(unsafe.Error(), "private-") {
 		t.Fatal("direct error construction bypassed sanitization")
 	}
+}
+
+func TestMalformedOAuthErrorDoesNotRetainTerminalCategory(t *testing.T) {
 	for _, raw := range []string{`{"code":"invalid_grant","code":123}`, `{"code":"invalid_grant","code":null}`, `{"code":"invalid_grant"`} {
 		if code := oauthResponseCategory(json.RawMessage(raw)); code != "oauth_error" {
-			t.Fatal("invalid nested error retained a partially decoded terminal category")
+			t.Fatalf("oauthResponseCategory(%s) = %q, want oauth_error", raw, code)
 		}
 	}
 }

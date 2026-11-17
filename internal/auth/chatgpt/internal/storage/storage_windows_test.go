@@ -108,20 +108,23 @@ func TestWindowsRejectsNullOrForeignDACL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, sddl := range []string{
-		"O:" + u.User.Sid.String() + "D:(A;;FA;;;" + u.User.Sid.String() + ")",
-		"O:" + u.User.Sid.String() + "D:NO_ACCESS_CONTROL",
-		"O:" + u.User.Sid.String() + "D:P(A;;FA;;;WD)",
-		"O:BAD:P(A;;FA;;;" + u.User.Sid.String() + ")",
+	for _, tc := range []struct{ name, sddl string }{
+		{"inherited DACL", "O:" + u.User.Sid.String() + "D:(A;;FA;;;" + u.User.Sid.String() + ")"},
+		{"null DACL", "O:" + u.User.Sid.String() + "D:NO_ACCESS_CONTROL"},
+		{"public grant", "O:" + u.User.Sid.String() + "D:P(A;;FA;;;WD)"},
+		{"foreign owner", "O:BAD:P(A;;FA;;;" + u.User.Sid.String() + ")"},
 	} {
-		sd, err := windows.SecurityDescriptorFromString(sddl)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !errors.Is(checkPrivateDescriptor(sd), errPrivateACL) {
-			t.Fatal("accepted an unprotected or null DACL, foreign owner, or public grant")
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			sd, err := windows.SecurityDescriptorFromString(tc.sddl)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := checkPrivateDescriptor(sd); !errors.Is(err, errPrivateACL) {
+				t.Fatalf("checkPrivateDescriptor error = %v, want private ACL rejection", err)
+			}
+		})
 	}
+
 }
 
 func TestWindowsReplacementRetriesSharingViolation(t *testing.T) {
@@ -137,7 +140,16 @@ func TestWindowsReplacementRetriesSharingViolation(t *testing.T) {
 	}
 	defer reader.Close()
 	done := make(chan error, 1)
-	go func() { done <- WriteJSON(path, "new") }()
+	stopped := make(chan struct{})
+	go func() { defer close(stopped); done <- WriteJSON(path, "new") }()
+	t.Cleanup(func() {
+		_ = reader.Close()
+		select {
+		case <-stopped:
+		case <-time.After(3 * time.Second):
+			t.Error("replacement goroutine did not stop during cleanup")
+		}
+	})
 	select {
 	case err := <-done:
 		t.Fatalf("replacement returned before the reader closed: %v", err)
@@ -175,8 +187,8 @@ func TestWindowsReplacementSharingTimeoutPreservesCredentials(t *testing.T) {
 	if err := WriteJSON(path, "new"); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) && !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 		t.Fatalf("expected bounded sharing violation: %v", err)
 	}
-	if time.Since(start) > 3*time.Second {
-		t.Fatal("sharing retry exceeded its bound")
+	if elapsed := time.Since(start); elapsed < time.Second || elapsed > 3*time.Second {
+		t.Fatalf("sharing retry duration = %v, want the one-second retry window within a three-second bound", elapsed)
 	}
 	var value string
 	if err := ReadJSON(path, &value); err != nil || value != "old" {

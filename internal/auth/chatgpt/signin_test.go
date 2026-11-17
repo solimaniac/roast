@@ -59,20 +59,10 @@ func TestSignInCallbackAndPKCE(t *testing.T) {
 		}
 		bad := url.Values{"state": {"wrong"}, "code": {"bad"}}
 		callback.RawQuery = bad.Encode()
-		res, e := http.Get(callback.String())
-		if e != nil {
-			return e
-		}
-		res.Body.Close()
-		if res.StatusCode != 400 {
-			t.Error("accepted bad state")
-		}
+		callbackGET(t, callback, http.StatusBadRequest)
 		callback.RawQuery = url.Values{"state": {q.Get("state")}, "code": {"code"}, "client_id": {"oaiapp_test"}}.Encode()
-		res, e = http.Get(callback.String())
-		if e == nil {
-			res.Body.Close()
-		}
-		return e
+		callbackGET(t, callback, http.StatusOK)
+		return nil
 	})
 	if e != nil {
 		t.Fatal(e)
@@ -123,11 +113,9 @@ func TestIdentityOnlyAndExplicitConsent(t *testing.T) {
 				return err
 			}
 			callback.RawQuery = url.Values{"code": {"code"}, "state": {q.Get("state")}, "client_id": {"oaiapp_test"}}.Encode()
-			r, e := http.Get(callback.String())
-			if e == nil {
-				r.Body.Close()
-			}
-			return e
+			callbackGET(t, callback, http.StatusOK)
+
+			return nil
 		}
 		var err error
 		if enable {
@@ -208,11 +196,9 @@ func TestFailedInitialExchangePreservesPendingRegistration(t *testing.T) {
 			return err
 		}
 		callback.RawQuery = url.Values{"code": {"code"}, "state": {q.Get("state")}, "client_id": {"oaiapp_test"}}.Encode()
-		res, err := http.Get(callback.String())
-		if err == nil {
-			res.Body.Close()
-		}
-		return err
+		callbackGET(t, callback, http.StatusOK)
+
+		return nil
 	}
 	if err := c.SignIn(context.Background(), "", show); err == nil || !strings.Contains(err.Error(), "--account oaiapp_test") {
 		t.Fatalf("failed exchange must explain retry: %v", err)
@@ -246,10 +232,19 @@ func TestFailedInitialExchangePreservesPendingRegistration(t *testing.T) {
 
 func TestIssuedClientIDOpaqueCallback(t *testing.T) {
 	for _, tt := range []struct {
+		name  string
 		id    string
 		valid bool
-	}{{"issued-client-v2", true}, {"oaiapp_example", true}, {"dynamic_agent_client", false}, {"", false}, {"has space", false}, {"line\nbreak", false}, {strings.Repeat("a", 257), false}} {
-		t.Run(tt.id, func(t *testing.T) {
+	}{
+		{"opaque ID", "issued-client-v2", true},
+		{"example prefix", "oaiapp_example", true},
+		{"registration placeholder", "dynamic_agent_client", false},
+		{"empty", "", false},
+		{"whitespace", "has space", false},
+		{"control character", "line\nbreak", false},
+		{"too long", strings.Repeat("a", 257), false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
 			c := testClient(t)
 			exchanged := false
 			c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
@@ -276,11 +271,9 @@ func TestIssuedClientIDOpaqueCallback(t *testing.T) {
 					return err
 				}
 				callback.RawQuery = url.Values{"state": {q.Get("state")}, "code": {"code"}, "client_id": {tt.id}}.Encode()
-				res, e := http.Get(callback.String())
-				if e == nil {
-					res.Body.Close()
-				}
-				return e
+				callbackGET(t, callback, http.StatusOK)
+
+				return nil
 			})
 			if err == nil {
 				t.Fatal("expected rejected callback or mocked exchange failure")

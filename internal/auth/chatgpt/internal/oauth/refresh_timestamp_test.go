@@ -69,6 +69,9 @@ func TestRefreshTimestampRepresentations(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRefreshTimestampTinyRemainders(t *testing.T) {
 	for zeros := 1; zeros <= 1500; zeros++ {
 		for _, last := range []string{"0", "1"} {
 			raw := `"1794182400.` + strings.Repeat("0", zeros) + last + `"`
@@ -83,6 +86,9 @@ func TestRefreshTimestampRepresentations(t *testing.T) {
 		}
 	}
 
+}
+
+func TestRefreshTimestampInvalidHintClearsPreviousValue(t *testing.T) {
 	var previous RefreshTimestamp = 42
 	if err := json.Unmarshal([]byte(`"invalid"`), &previous); err != nil || previous != 0 {
 		t.Fatal("invalid hint retained stale scheduling metadata")
@@ -90,16 +96,18 @@ func TestRefreshTimestampRepresentations(t *testing.T) {
 }
 
 func TestOptionalMetadataDoesNotRelaxCredentialParsing(t *testing.T) {
-	for _, wire := range []string{
-		`{"access_token":123,"earliest_refresh_at":"invalid"}`,
-		`{"refresh_token":{},"earliest_refresh_at":null}`,
-		`{"scope":[],"earliest_refresh_at":"invalid"}`,
-		`{"expires_in":"3600","earliest_refresh_at":"invalid"}`,
-		`{"earliest_refresh_at":`,
+	for _, tc := range []struct{ name, wire string }{
+		{"numeric access token", `{"access_token":123,"earliest_refresh_at":"invalid"}`},
+		{"object refresh token", `{"refresh_token":{},"earliest_refresh_at":null}`},
+		{"array scope", `{"scope":[],"earliest_refresh_at":"invalid"}`},
+		{"string expiration", `{"expires_in":"3600","earliest_refresh_at":"invalid"}`},
+		{"truncated JSON", `{"earliest_refresh_at":`},
 	} {
-		var token TokenResponse
-		if err := json.Unmarshal([]byte(wire), &token); err == nil {
-			t.Fatal("invalid credential response accepted")
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			var token TokenResponse
+			if err := json.Unmarshal([]byte(tc.wire), &token); err == nil {
+				t.Fatal("invalid credential response accepted")
+			}
+		})
 	}
 }
