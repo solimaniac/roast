@@ -46,7 +46,7 @@ func (c *Client) signIn(ctx context.Context, clientID string, consent bool, show
 	ctx, cancel := signInContext(ctx)
 	defer cancel()
 
-	return c.authorizationLocked(ctx, clientID, func() error {
+	return c.withAuthorizationLock(ctx, clientID, func() error {
 		snapshot, err := c.beginSignIn(ctx, clientID)
 		if err != nil {
 			return err
@@ -88,7 +88,7 @@ func (c *Client) signIn(ctx context.Context, clientID string, consent bool, show
 
 		if clientID == "" {
 			// Serialize the new ID with reauthorizations before publishing it.
-			return c.authorizationLocked(ctx, callback.ClientID, func() error {
+			return c.withAuthorizationLock(ctx, callback.ClientID, func() error {
 				return c.finishSignIn(ctx, snapshot, auth, redirect, callback)
 			})
 		}
@@ -105,14 +105,14 @@ type signInSnapshot struct {
 
 func (c *Client) beginSignIn(ctx context.Context, clientID string) (signInSnapshot, error) {
 	var snapshot signInSnapshot
-	err := c.locked(ctx, func() error {
+	err := c.withSessionLock(ctx, func() error {
 		i, err := c.loadIndex()
 		if err != nil {
 			return err
 		}
 		var previous credential
 		if clientID != "" {
-			previous, err = c.load(clientID)
+			previous, err = c.loadCredential(clientID)
 			if err != nil {
 				return err
 			}
@@ -136,10 +136,10 @@ func (c *Client) beginSignIn(ctx context.Context, clientID string) (signInSnapsh
 		}
 		// Older writers drop the generation even on an idempotent sign-out.
 		if clientID != "" && previous.Generation == "" {
-			if err := c.save(previous); err != nil {
+			if err := c.saveCredential(previous); err != nil {
 				return err
 			}
-			previous, err = c.load(clientID)
+			previous, err = c.loadCredential(clientID)
 			if err != nil {
 				return err
 			}
@@ -192,7 +192,7 @@ func (c *Client) finishSignIn(ctx context.Context, snapshot signInSnapshot, auth
 // persist its pending registration so the user can retry a failed exchange.
 func (c *Client) prepareExchange(ctx context.Context, snapshot signInSnapshot, clientID string) (credential, error) {
 	previous := snapshot.credential
-	err := c.locked(ctx, func() error {
+	err := c.withSessionLock(ctx, func() error {
 		current, err := c.loadSignInIndex(snapshot.hostID)
 		if err != nil {
 			return err
@@ -203,14 +203,14 @@ func (c *Client) prepareExchange(ctx context.Context, snapshot signInSnapshot, c
 		if slices.Contains(current.Clients, clientID) {
 			return errors.New("ChatGPT registration already exists; reauthorize using --account")
 		}
-		if _, err := c.load(clientID); !errors.Is(err, os.ErrNotExist) {
+		if _, err := c.loadCredential(clientID); !errors.Is(err, os.ErrNotExist) {
 			return errors.New("ChatGPT registration record already exists or is unreadable; reauthorize using --account")
 		}
 		pending := credential{Account: Account{ClientID: clientID, PendingRegistration: true}}
-		if err := c.save(pending); err != nil {
+		if err := c.saveCredential(pending); err != nil {
 			return err
 		}
-		previous, err = c.load(clientID)
+		previous, err = c.loadCredential(clientID)
 		if err != nil {
 			return err
 		}
@@ -221,7 +221,7 @@ func (c *Client) prepareExchange(ctx context.Context, snapshot signInSnapshot, c
 }
 
 func (c *Client) commitSignIn(ctx context.Context, snapshot signInSnapshot, previous, next credential) error {
-	return c.locked(ctx, func() error {
+	return c.withSessionLock(ctx, func() error {
 		current, err := c.loadSignInIndex(snapshot.hostID)
 		if err != nil {
 			return err
@@ -229,7 +229,7 @@ func (c *Client) commitSignIn(ctx context.Context, snapshot signInSnapshot, prev
 		if err := c.checkSignInSnapshot(previous); err != nil {
 			return err
 		}
-		if err := c.save(next); err != nil {
+		if err := c.saveCredential(next); err != nil {
 			return err
 		}
 		if !slices.Contains(current.Clients, next.ClientID) {
@@ -258,7 +258,7 @@ func (c *Client) loadSignInIndex(hostID string) (index, error) {
 
 // checkSignInSnapshot runs under the session lock at both exchange and commit.
 func (c *Client) checkSignInSnapshot(old credential) error {
-	current, err := c.load(old.ClientID)
+	current, err := c.loadCredential(old.ClientID)
 	if err != nil {
 		return err
 	}

@@ -21,7 +21,7 @@ func TestTransientOAuthFailurePreservesRefreshCredentials(t *testing.T) {
 			if token, err := c.Token(context.Background()); token != "" || !errors.Is(err, ErrNetwork) {
 				t.Fatalf("transient response misclassified: %v", err)
 			}
-			v, err := c.load(c.selected)
+			v, err := c.loadCredential(c.selected)
 			if err != nil || v.AccessToken != "access" || v.RefreshToken != "refresh" || v.Pending != nil {
 				t.Fatal("transient response erased credentials")
 			}
@@ -38,7 +38,7 @@ func TestBareUnauthorizedDoesNotEraseCredentials(t *testing.T) {
 	if _, err := c.Token(context.Background()); !errors.Is(err, ErrAuth) {
 		t.Fatalf("wrong classification: %v", err)
 	}
-	v, err := c.load(c.selected)
+	v, err := c.loadCredential(c.selected)
 	if err != nil || v.RefreshToken != "refresh" {
 		t.Fatal("HTTP status alone erased refresh token")
 	}
@@ -58,7 +58,7 @@ func TestMalformedOAuthErrorDoesNotEraseCredentials(t *testing.T) {
 		if _, err := c.Token(context.Background()); !errors.Is(err, ErrAuth) || !strings.Contains(err.Error(), "oauth_error") {
 			t.Fatalf("malformed error retained a terminal category: %v", err)
 		}
-		v, err := c.load(c.selected)
+		v, err := c.loadCredential(c.selected)
 		if err != nil || v.AccessToken != "access" || v.RefreshToken != "refresh" {
 			t.Fatal("malformed error erased credentials")
 		}

@@ -15,13 +15,13 @@ func TestPrivateFilesAndLockCancellation(t *testing.T) {
 	c := testClient(t)
 	seed(t, c, time.Now().Add(time.Hour))
 	if runtime.GOOS != "windows" {
-		if e := os.Chmod(c.path(c.selected), 0644); e != nil {
+		if e := os.Chmod(c.credentialPath(c.selected), 0644); e != nil {
 			t.Fatal(e)
 		}
 		if _, e := c.Token(context.Background()); e == nil {
 			t.Fatal("accepted public credential")
 		}
-		if err := os.Chmod(c.path(c.selected), 0600); err != nil {
+		if err := os.Chmod(c.credentialPath(c.selected), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -59,7 +59,7 @@ func TestLockReleaseAndStablePreparedHost(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := c.locked(ctx, func() error { return nil }); err != nil {
+	if err := c.withSessionLock(ctx, func() error { return nil }); err != nil {
 		t.Fatalf("session lock remained held: %v", err)
 	}
 }

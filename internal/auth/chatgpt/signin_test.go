@@ -71,7 +71,7 @@ func TestSignInCallbackAndPKCE(t *testing.T) {
 	if e != nil || i.Active != "oaiapp_test" {
 		t.Fatal("registration not activated")
 	}
-	v, e := c.load(i.Active)
+	v, e := c.loadCredential(i.Active)
 	if e != nil || v.Subject != "subject" || v.IDToken == "" {
 		t.Fatal("identity not stored")
 	}
@@ -128,7 +128,7 @@ func TestIdentityOnlyAndExplicitConsent(t *testing.T) {
 		}
 	}
 	run(false)
-	v, err := c.load("oaiapp_test")
+	v, err := c.loadCredential("oaiapp_test")
 	if err != nil || v.IDToken == "" || v.Subject != "subject" {
 		t.Fatal("identity-only sign-in was lost")
 	}
@@ -150,7 +150,7 @@ func TestFailedInitialExchangePreservesPendingRegistration(t *testing.T) {
 		t.Fatal(err)
 	}
 	existing := credential{Account: Account{ClientID: "oaiapp_existing", Subject: "existing-subject"}, AccessToken: "existing-access", Scopes: oauth.Scope}
-	if err := c.save(existing); err != nil {
+	if err := c.saveCredential(existing); err != nil {
 		t.Fatal(err)
 	}
 	var nonce string
@@ -203,7 +203,7 @@ func TestFailedInitialExchangePreservesPendingRegistration(t *testing.T) {
 	if err := c.SignIn(context.Background(), "", show); err == nil || !strings.Contains(err.Error(), "--account oaiapp_test") {
 		t.Fatalf("failed exchange must explain retry: %v", err)
 	}
-	pending, err := c.load("oaiapp_test")
+	pending, err := c.loadCredential("oaiapp_test")
 	if err != nil || !pending.PendingRegistration || pending.Subject != "" || pending.Email != "" || pending.AccessToken != "" || pending.RefreshToken != "" || pending.IDToken != "" {
 		t.Fatal("pending callback was lost or treated as verified identity")
 	}
@@ -217,7 +217,7 @@ func TestFailedInitialExchangePreservesPendingRegistration(t *testing.T) {
 	if err := c.SignIn(context.Background(), "oaiapp_test", show); err != nil {
 		t.Fatal(err)
 	}
-	verified, err := c.load("oaiapp_test")
+	verified, err := c.loadCredential("oaiapp_test")
 	if err != nil || verified.PendingRegistration || verified.Subject != "subject" || verified.AccessToken == "" {
 		t.Fatal("pending registration did not complete identity validation")
 	}
@@ -282,7 +282,7 @@ func TestIssuedClientIDOpaqueCallback(t *testing.T) {
 				t.Fatalf("exchange=%t, valid=%t", exchanged, tt.valid)
 			}
 			if tt.valid {
-				pending, e := c.load(tt.id)
+				pending, e := c.loadCredential(tt.id)
 				if e != nil || !pending.PendingRegistration || pending.ClientID != tt.id {
 					t.Fatal("opaque issued ID not retained")
 				}

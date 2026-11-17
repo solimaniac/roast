@@ -65,12 +65,12 @@ func (i *index) setActive(id string) error {
 	}
 }
 
-func (c *Client) path(id string) string {
+func (c *Client) credentialPath(id string) string {
 	h := sha256.Sum256([]byte(id))
 	return filepath.Join(c.dir, hex.EncodeToString(h[:])+".json")
 }
 
-func (c *Client) locked(ctx context.Context, fn func() error) error {
+func (c *Client) withSessionLock(ctx context.Context, fn func() error) error {
 	return storage.WithLock(ctx, c.dir, "session", func() error {
 		if err := storage.CleanupTemps(c.dir); err != nil {
 			return fmt.Errorf("clean up interrupted ChatGPT credential writes: %w", err)
@@ -79,10 +79,9 @@ func (c *Client) locked(ctx context.Context, fn func() error) error {
 	})
 }
 
-// Authorization waits never own the session lock. Separate registration locks
-// prevent overlapping OAuth flows from consuming or replacing each other's
-// credentials, while other accounts can sign in and use the store normally.
-func (c *Client) authorizationLocked(ctx context.Context, id string, fn func() error) error {
+// withAuthorizationLock serializes sign-ins for one registration. Browser
+// waits leave the session lock free so other accounts can use the store.
+func (c *Client) withAuthorizationLock(ctx context.Context, id string, fn func() error) error {
 	name := "authorization-new"
 	if id != "" {
 		h := sha256.Sum256([]byte(id))
@@ -102,15 +101,15 @@ func (c *Client) loadIndex() (index, error) {
 func (c *Client) saveIndex(i index) error {
 	return storage.WriteJSON(filepath.Join(c.dir, "accounts.json"), i)
 }
-func (c *Client) load(id string) (credential, error) {
+func (c *Client) loadCredential(id string) (credential, error) {
 	var v credential
-	err := storage.ReadJSON(c.path(id), &v)
+	err := storage.ReadJSON(c.credentialPath(id), &v)
 	if err == nil && v.ClientID != id {
 		return v, errors.New("ChatGPT registration identity mismatch")
 	}
 	return v, err
 }
-func (c *Client) save(v credential) error {
+func (c *Client) saveCredential(v credential) error {
 	// Every write, including a repeated sign-out, invalidates an OAuth snapshot.
 	// A fresh opaque generation also works with records written by older Roast.
 	generation, err := randomValue()
@@ -118,5 +117,5 @@ func (c *Client) save(v credential) error {
 		return err
 	}
 	v.Generation = generation
-	return storage.WriteJSON(c.path(v.ClientID), v)
+	return storage.WriteJSON(c.credentialPath(v.ClientID), v)
 }

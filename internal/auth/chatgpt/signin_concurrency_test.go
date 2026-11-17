@@ -102,12 +102,12 @@ func awaitMockSignIn(t *testing.T, done <-chan error) error {
 
 func addMockAccount(t *testing.T, c *Client, id string) {
 	t.Helper()
-	if err := c.locked(context.Background(), func() error {
+	if err := c.withSessionLock(context.Background(), func() error {
 		i, err := c.loadIndex()
 		if err != nil {
 			return err
 		}
-		if err = c.save(credential{Account: Account{ClientID: id, Subject: "subject", ExpiresAt: time.Now().Add(time.Hour)}, AccessToken: "access-" + id, RefreshToken: "refresh-" + id, Scopes: oauth.Scope}); err != nil {
+		if err = c.saveCredential(credential{Account: Account{ClientID: id, Subject: "subject", ExpiresAt: time.Now().Add(time.Hour)}, AccessToken: "access-" + id, RefreshToken: "refresh-" + id, Scopes: oauth.Scope}); err != nil {
 			return err
 		}
 		i.Clients = append(i.Clients, id)
@@ -157,11 +157,11 @@ func TestPendingSignInLeavesAccountOperationsAvailable(t *testing.T) {
 			if err != nil || i.Active != "" || len(i.Clients) != 2 {
 				t.Fatalf("sign-in overwrote sign-out or lost registrations: %+v, %v", i, err)
 			}
-			v, err := c.load(c.selected)
+			v, err := c.loadCredential(c.selected)
 			if err != nil || v.AccessToken != "" || v.RefreshToken != "" {
 				t.Fatal("sign-in resurrected the signed-out account")
 			}
-			v, err = c.load("account-b")
+			v, err = c.loadCredential("account-b")
 			if err != nil || v.AccessToken != "authorized-account-b" {
 				t.Fatal("independent sign-in did not persist")
 			}
@@ -265,7 +265,7 @@ func TestSignInRejectsConcurrentCredentialChange(t *testing.T) {
 				if phase == "browser wait" && exchanges.Load() != 0 {
 					t.Fatal("consumed code after credentials had already changed")
 				}
-				v, err := c.load(c.selected)
+				v, err := c.loadCredential(c.selected)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -382,7 +382,7 @@ func TestPendingRegistrationSignOutPreventsActivation(t *testing.T) {
 	if err := awaitMockSignIn(t, done); err == nil || !strings.Contains(err.Error(), "credentials changed") {
 		t.Fatalf("signed-out pending registration was activated: %v", err)
 	}
-	v, err := c.load("account-b")
+	v, err := c.loadCredential("account-b")
 	if err != nil || !v.PendingRegistration || v.AccessToken != "" || v.IDToken != "" {
 		t.Fatal("pending registration was not left signed out")
 	}
@@ -422,7 +422,7 @@ func TestSignInRejectsChangedHost(t *testing.T) {
 					t.Fatal("exchange did not begin")
 				}
 			}
-			if err := c.locked(context.Background(), func() error {
+			if err := c.withSessionLock(context.Background(), func() error {
 				i, err := c.loadIndex()
 				if err != nil {
 					return err
@@ -442,7 +442,7 @@ func TestSignInRejectsChangedHost(t *testing.T) {
 			if phase == "browser wait" && exchanges.Load() != 0 {
 				t.Fatal("consumed code after host had already changed")
 			}
-			v, err := c.load(c.selected)
+			v, err := c.loadCredential(c.selected)
 			if err != nil || v.AccessToken != "access" {
 				t.Fatal("sign-in for old host changed credentials")
 			}
@@ -455,7 +455,7 @@ func TestSignInRejectsLegacyCredentialWrites(t *testing.T) {
 		t.Run(mutation, func(t *testing.T) {
 			c := testClient(t)
 			seed(t, c, time.Now().Add(time.Hour))
-			v, err := c.load(c.selected)
+			v, err := c.loadCredential(c.selected)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -463,12 +463,12 @@ func TestSignInRejectsLegacyCredentialWrites(t *testing.T) {
 			if mutation == "repeated sign-out" {
 				v.AccessToken, v.RefreshToken, v.Scopes = "", "", ""
 			}
-			if err = storage.WriteJSON(c.path(v.ClientID), v); err != nil {
+			if err = storage.WriteJSON(c.credentialPath(v.ClientID), v); err != nil {
 				t.Fatal(err)
 			}
 			auth, done := beginMockSignIn(t, c, c.selected)
-			if err = c.locked(context.Background(), func() error {
-				current, err := c.load(c.selected)
+			if err = c.withSessionLock(context.Background(), func() error {
+				current, err := c.loadCredential(c.selected)
 				if err != nil {
 					return err
 				}
@@ -483,7 +483,7 @@ func TestSignInRejectsLegacyCredentialWrites(t *testing.T) {
 				} else {
 					current.AccessToken, current.RefreshToken, current.Scopes = "", "", ""
 				}
-				return storage.WriteJSON(c.path(current.ClientID), current)
+				return storage.WriteJSON(c.credentialPath(current.ClientID), current)
 			}); err != nil {
 				t.Fatal(err)
 			}
@@ -513,7 +513,7 @@ func TestSignInTokenExpiryAnchoredToReceipt(t *testing.T) {
 	if err := awaitMockSignIn(t, done); err != nil {
 		t.Fatal(err)
 	}
-	v, err := c.load("account-b")
+	v, err := c.loadCredential("account-b")
 	if err != nil || !v.ExpiresAt.Equal(received.Add(time.Hour)) {
 		t.Fatalf("JWKS delay extended access-token expiry: %v, %v", v.ExpiresAt, err)
 	}
@@ -524,7 +524,7 @@ func TestPendingSignInPreservesLegacyReselection(t *testing.T) {
 	seed(t, c, time.Now().Add(time.Hour))
 	c.provider.HTTP.Transport = mockSignInTransport(t, signingKey(t))
 	auth, done := beginMockSignIn(t, c, "")
-	if err := c.locked(context.Background(), func() error {
+	if err := c.withSessionLock(context.Background(), func() error {
 		i, err := c.loadIndex()
 		if err != nil {
 			return err
@@ -554,7 +554,7 @@ func TestPendingSignInPreservesLegacyReselectionAcrossAnotherSignIn(t *testing.T
 	addMockAccount(t, c, "account-b")
 	addMockAccount(t, c, "account-c")
 	c.provider.HTTP.Transport = mockSignInTransport(t, signingKey(t))
-	if err := c.locked(context.Background(), func() error {
+	if err := c.withSessionLock(context.Background(), func() error {
 		i, err := c.loadIndex()
 		if err != nil {
 			return err
@@ -567,7 +567,7 @@ func TestPendingSignInPreservesLegacyReselectionAcrossAnotherSignIn(t *testing.T
 	// B snapshots (A, 1), then an older binary explicitly reselects A and
 	// drops the revision. C begins authorizing and initializes that revision.
 	first, firstDone := beginMockSignIn(t, c, "account-b")
-	if err := c.locked(context.Background(), func() error {
+	if err := c.withSessionLock(context.Background(), func() error {
 		i, err := c.loadIndex()
 		if err != nil {
 			return err
@@ -618,7 +618,7 @@ func TestPendingSignInPreservesLegacyReselectionAcrossSelect(t *testing.T) {
 	auth, done := beginMockSignIn(t, c, "account-b")
 	// An older Select(A) drops the revision. A newer Select(A) must not
 	// recreate B's snapshot, even though the selected account stays the same.
-	if err = c.locked(context.Background(), func() error {
+	if err = c.withSessionLock(context.Background(), func() error {
 		i, err := c.loadIndex()
 		if err != nil {
 			return err
@@ -663,7 +663,7 @@ func TestSelectionWritePathsUseFreshRevisions(t *testing.T) {
 				seed(t, c, time.Now().Add(time.Hour))
 				addMockAccount(t, c, "account-b")
 				c.provider.HTTP.Transport = mockSignInTransport(t, signingKey(t))
-				signedIn, err := c.load(c.selected)
+				signedIn, err := c.loadCredential(c.selected)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -671,14 +671,14 @@ func TestSelectionWritePathsUseFreshRevisions(t *testing.T) {
 				for range 2 {
 					// Reset the same index revision, as a legacy writer can do.
 					// Restore A's synthetic credentials for the sign-out case.
-					if err = c.locked(context.Background(), func() error {
+					if err = c.withSessionLock(context.Background(), func() error {
 						i, err := c.loadIndex()
 						if err != nil {
 							return err
 						}
 						i.Active = c.selected
 						i.SelectionVersion = baseline.version
-						if err = c.save(signedIn); err != nil {
+						if err = c.saveCredential(signedIn); err != nil {
 							return err
 						}
 						return c.saveIndex(i)

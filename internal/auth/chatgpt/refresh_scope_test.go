@@ -50,7 +50,7 @@ func TestRefreshScopePresence(t *testing.T) {
 			} else if !errors.Is(err, ErrAuth) || token != "" || !strings.Contains(err.Error(), "permission was removed") {
 				t.Fatalf("removed grant accepted: %v", err)
 			}
-			v, err := c.load(c.selected)
+			v, err := c.loadCredential(c.selected)
 			if err != nil || v.Scopes != tc.want || v.RefreshToken != "rotated-refresh" || v.Pending != nil || calls != 1 {
 				t.Fatalf("refresh result not committed correctly: %v", err)
 			}
@@ -82,7 +82,7 @@ func TestOmittedRefreshScopeSurvivesPendingRecovery(t *testing.T) {
 	if token, err := c.Token(context.Background()); token != "" || !errors.Is(err, ErrNetwork) {
 		t.Fatalf("pending result escaped: %v", err)
 	}
-	v, err := c.load(c.selected)
+	v, err := c.loadCredential(c.selected)
 	if err != nil || v.Pending == nil || v.Pending.Response.Scope != nil || v.Scopes != oauth.Scope || v.Pending.Response.RefreshToken != "rotated-refresh" {
 		t.Fatal("pending response lost scope absence or rotation")
 	}
@@ -90,7 +90,7 @@ func TestOmittedRefreshScopeSurvivesPendingRecovery(t *testing.T) {
 	if token, err := resumed.Token(context.Background()); err != nil || token != "rotated-access" || refreshes != 1 {
 		t.Fatalf("pending recovery failed: %v", err)
 	}
-	v, err = c.load(c.selected)
+	v, err = c.loadCredential(c.selected)
 	if err != nil || v.Scopes != oauth.Scope || v.Pending != nil || v.RefreshToken != "rotated-refresh" {
 		t.Fatal("pending scope was not preserved")
 	}

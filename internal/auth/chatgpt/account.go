@@ -23,13 +23,13 @@ func (c *Client) Status(ctx context.Context) ([]Account, error) {
 		return nil, nil
 	}
 	var out []Account
-	err := c.locked(ctx, func() error {
+	err := c.withSessionLock(ctx, func() error {
 		i, err := c.loadIndex()
 		if err != nil {
 			return err
 		}
 		for _, id := range i.Clients {
-			v, err := c.load(id)
+			v, err := c.loadCredential(id)
 			if err != nil {
 				return err
 			}
@@ -45,12 +45,12 @@ func (c *Client) Status(ctx context.Context) ([]Account, error) {
 }
 
 func (c *Client) Select(ctx context.Context, id string) error {
-	return c.locked(ctx, func() error {
+	return c.withSessionLock(ctx, func() error {
 		i, err := c.loadIndex()
 		if err != nil {
 			return err
 		}
-		v, err := c.load(id)
+		v, err := c.loadCredential(id)
 		if err != nil {
 			return err
 		}
@@ -65,7 +65,7 @@ func (c *Client) Select(ctx context.Context, id string) error {
 }
 
 func (c *Client) SignOut(ctx context.Context, id string) error {
-	return c.locked(ctx, func() error {
+	return c.withSessionLock(ctx, func() error {
 		i, err := c.loadIndex()
 		if err != nil {
 			return err
@@ -76,7 +76,7 @@ func (c *Client) SignOut(ctx context.Context, id string) error {
 		if id == "" {
 			return errors.New("no active ChatGPT account")
 		}
-		v, err := c.load(id)
+		v, err := c.loadCredential(id)
 		if err != nil {
 			return err
 		}
@@ -93,7 +93,7 @@ func (c *Client) SignOut(ctx context.Context, id string) error {
 		v.clearTokens()
 		v.Scopes = ""
 		v.Pending = nil
-		if err := c.save(v); err != nil {
+		if err := c.saveCredential(v); err != nil {
 			return err
 		}
 		if i.Active == id {

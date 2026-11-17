@@ -292,7 +292,7 @@ func TestAsyncSignInCancellationReleasesLock(t *testing.T) {
 	}
 	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := c.locked(ctx, func() error { return nil }); err != nil {
+	if err := c.withSessionLock(ctx, func() error { return nil }); err != nil {
 		t.Fatalf("lock not released: %v", err)
 	}
 	// Browser waiting holds the per-account authorization lock, not the store

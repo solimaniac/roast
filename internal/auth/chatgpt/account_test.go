@@ -22,7 +22,7 @@ func TestSignOutKeepsRegistrationOnNetworkFailure(t *testing.T) {
 	if e == nil || !strings.Contains(e.Error(), "remote revocation was not confirmed") {
 		t.Fatal("must explain unconfirmed revocation")
 	}
-	v, err := c.load(c.selected)
+	v, err := c.loadCredential(c.selected)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func TestSelectedRegistrationPinnedAndIndependent(t *testing.T) {
 	c := testClient(t)
 	seed(t, c, time.Now().Add(time.Hour))
 	other := credential{Account: Account{ClientID: "oaiapp_other", Subject: "another", ExpiresAt: time.Now().Add(time.Hour)}, AccessToken: "other-access", RefreshToken: "other-refresh", Scopes: oauth.Scope}
-	if err := c.save(other); err != nil {
+	if err := c.saveCredential(other); err != nil {
 		t.Fatal(err)
 	}
 	i, err := c.loadIndex()
@@ -73,7 +73,7 @@ func TestSignOutRemovesInterruptedCredentialWrites(t *testing.T) {
 	if _, err := os.Lstat(orphan); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("orphan remained after sign-out: %v", err)
 	}
-	saved, err := c.load(c.selected)
+	saved, err := c.loadCredential(c.selected)
 	if err != nil {
 		t.Fatal(err)
 	}

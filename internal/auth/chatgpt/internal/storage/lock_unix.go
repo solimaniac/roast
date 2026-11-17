@@ -4,8 +4,9 @@ package storage
 
 import (
 	"errors"
-	"golang.org/x/sys/unix"
 	"os"
+
+	"golang.org/x/sys/unix"
 )
 
 func tryLock(f *os.File) (bool, error) {

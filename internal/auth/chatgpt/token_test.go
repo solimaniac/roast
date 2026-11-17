@@ -44,7 +44,7 @@ func TestRefreshSerializedAndRotated(t *testing.T) {
 		t.Fatalf("refresh called %d times", calls.Load())
 	}
 
-	saved, err := c.load(c.selected)
+	saved, err := c.loadCredential(c.selected)
 	if err != nil {
 		t.Fatalf("load rotated credential: %v", err)
 	}
@@ -68,19 +68,19 @@ func TestEarliestRefresh(t *testing.T) {
 	now := time.Date(2026, time.November, 1, 12, 0, 0, 0, time.UTC)
 	c.now = func() time.Time { return now }
 	seed(t, c, now.Add(20*time.Second))
-	v, err := c.load(c.selected)
+	v, err := c.loadCredential(c.selected)
 	if err != nil {
 		t.Fatal(err)
 	}
 	v.EarliestRefreshAt = now.Add(30 * time.Second).Unix()
-	if err := c.save(v); err != nil {
+	if err := c.saveCredential(v); err != nil {
 		t.Fatal(err)
 	}
 	if _, e := c.Token(context.Background()); e != nil {
 		t.Fatal(e)
 	}
 	v.ExpiresAt = now.Add(-time.Second)
-	if err := c.save(v); err != nil {
+	if err := c.saveCredential(v); err != nil {
 		t.Fatal(err)
 	}
 	if _, e := c.Token(context.Background()); !errors.Is(e, ErrAuth) {
@@ -98,7 +98,7 @@ func TestTerminalRefreshClearsOnlyTokens(t *testing.T) {
 	if !errors.Is(e, ErrAuth) || strings.Contains(e.Error(), "secret") {
 		t.Fatal("unsafe or unclassified error")
 	}
-	v, err := c.load(c.selected)
+	v, err := c.loadCredential(c.selected)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestNetworkErrorDoesNotClearTokens(t *testing.T) {
 	if !errors.Is(e, ErrNetwork) || strings.Contains(e.Error(), "secret") {
 		t.Fatal("unsafe or unclassified error")
 	}
-	v, err := c.load(c.selected)
+	v, err := c.loadCredential(c.selected)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestRefreshPendingSurvivesJWKSFailure(t *testing.T) {
 	if token, err := c.Token(context.Background()); token != "" || !errors.Is(err, ErrNetwork) {
 		t.Fatalf("pending tokens must not escape: %v", err)
 	}
-	saved, err := c.load(c.selected)
+	saved, err := c.loadCredential(c.selected)
 	if err != nil || saved.Pending == nil || saved.Pending.Response.RefreshToken != "rotated-refresh" || saved.AccessToken != "access" {
 		t.Fatal("rotation not durably staged")
 	}
@@ -157,7 +157,7 @@ func TestRefreshPendingSurvivesJWKSFailure(t *testing.T) {
 	if err != nil || token != "rotated-access" || refreshes != 1 {
 		t.Fatalf("did not resume validation: refreshes=%d err=%v", refreshes, err)
 	}
-	saved, err = c.load(c.selected)
+	saved, err = c.loadCredential(c.selected)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,17 +170,17 @@ func TestPendingWrongIdentityNeverExposed(t *testing.T) {
 	c := testClient(t)
 	seed(t, c, time.Now().Add(-time.Minute))
 	key := signingKey(t)
-	v, err := c.load(c.selected)
+	v, err := c.loadCredential(c.selected)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cl := claims("")
 	cl["sub"] = "different"
 	v.Pending = &pendingRefresh{Response: oauth.TokenResponse{AccessToken: "wrong-account", RefreshToken: "new-refresh", IDToken: signed(t, key, cl), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600}, ReceivedAt: time.Now()}
-	if err := c.save(v); err != nil {
+	if err := c.saveCredential(v); err != nil {
 		t.Fatal(err)
 	}
-	before, err := c.load(c.selected)
+	before, err := c.loadCredential(c.selected)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +201,7 @@ func TestPendingWrongIdentityNeverExposed(t *testing.T) {
 	if jwksCalls != 1 {
 		t.Errorf("JWKS calls = %d, want 1", jwksCalls)
 	}
-	after, err := c.load(c.selected)
+	after, err := c.loadCredential(c.selected)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,12 +230,12 @@ func TestPendingRefreshDelayedPastIDExpiry(t *testing.T) {
 			cl := claims("")
 			cl["iat"] = received.Unix()
 			cl["exp"] = received.Add(10 * time.Minute).Unix()
-			v, err := c.load(c.selected)
+			v, err := c.loadCredential(c.selected)
 			if err != nil {
 				t.Fatal(err)
 			}
 			v.Pending = &pendingRefresh{Response: oauth.TokenResponse{AccessToken: "pending-access", RefreshToken: "pending-refresh", IDToken: signed(t, key, cl), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600}, ReceivedAt: received}
-			if err := c.save(v); err != nil {
+			if err := c.saveCredential(v); err != nil {
 				t.Fatal(err)
 			}
 			refreshes := 0
@@ -261,7 +261,7 @@ func TestPendingRefreshDelayedPastIDExpiry(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			saved, err := c.load(c.selected)
+			saved, err := c.loadCredential(c.selected)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -303,7 +303,7 @@ func TestPendingRefreshRejectsPermanentFailures(t *testing.T) {
 			case "expired at receipt":
 				cl["exp"] = received.Unix()
 			}
-			v, err := c.load(c.selected)
+			v, err := c.loadCredential(c.selected)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -316,7 +316,7 @@ func TestPendingRefreshRejectsPermanentFailures(t *testing.T) {
 			case "incomplete response":
 				v.Pending.Response.TokenType = "unsupported"
 			}
-			if err := c.save(v); err != nil {
+			if err := c.saveCredential(v); err != nil {
 				t.Fatal(err)
 			}
 			c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
@@ -328,7 +328,7 @@ func TestPendingRefreshRejectsPermanentFailures(t *testing.T) {
 			if token, err := c.Token(context.Background()); token != "" || !errors.Is(err, ErrAuth) {
 				t.Fatalf("invalid receipt/identity accepted: %v", err)
 			}
-			saved, err := c.load(c.selected)
+			saved, err := c.loadCredential(c.selected)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -389,7 +389,7 @@ func TestRefreshRechecksExpiryAfterValidation(t *testing.T) {
 			if refreshes != 1 {
 				t.Fatal("retried refresh within the same call")
 			}
-			saved, err := c.load(c.selected)
+			saved, err := c.loadCredential(c.selected)
 			if err != nil {
 				t.Fatal(err)
 			}

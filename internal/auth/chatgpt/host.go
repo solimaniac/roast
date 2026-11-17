@@ -60,7 +60,7 @@ func (c *Client) ensureHost(i *index) error {
 // PrepareHost explicitly initializes only this runtime's stable host identity.
 // It creates no OAuth client registration or token.
 func (c *Client) PrepareHost(ctx context.Context) (hostID, dir string, err error) {
-	err = c.locked(ctx, func() error {
+	err = c.withSessionLock(ctx, func() error {
 		i, err := c.loadIndex()
 		if err != nil {
 			return err

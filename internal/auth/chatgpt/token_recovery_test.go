@@ -20,7 +20,7 @@ func TestPendingRefreshRetainsCheckpointWhenKeysUnavailable(t *testing.T) {
 			c.now = func() time.Time { return now }
 			seed(t, c, now.Add(-time.Minute))
 			key := signingKey(t)
-			v, err := c.load(c.selected)
+			v, err := c.loadCredential(c.selected)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -32,10 +32,10 @@ func TestPendingRefreshRetainsCheckpointWhenKeysUnavailable(t *testing.T) {
 				},
 				ReceivedAt: now,
 			}
-			if err := c.save(v); err != nil {
+			if err := c.saveCredential(v); err != nil {
 				t.Fatal(err)
 			}
-			before, err := c.load(c.selected)
+			before, err := c.loadCredential(c.selected)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -56,7 +56,7 @@ func TestPendingRefreshRetainsCheckpointWhenKeysUnavailable(t *testing.T) {
 			if token != "" || !errors.Is(err, ErrNetwork) || errors.Is(err, ErrAuth) || calls != 1 {
 				t.Fatalf("Token = %q, %v; requests = %d; want retryable key failure", token, err, calls)
 			}
-			after, err := c.load(c.selected)
+			after, err := c.loadCredential(c.selected)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -82,7 +82,7 @@ func TestRefreshPersistenceFailureProvidesRecoveryGuidance(t *testing.T) {
 			c := testClient(t)
 			seed(t, c, time.Now().Add(-time.Minute))
 			key := signingKey(t)
-			path := c.path(c.selected)
+			path := c.credentialPath(c.selected)
 			backup := path + ".backup"
 			blocked := false
 			restore := func() {
@@ -140,7 +140,7 @@ func TestRefreshPersistenceFailureProvidesRecoveryGuidance(t *testing.T) {
 				t.Fatalf("failure incorrectly implies durable cleanup: %v", err)
 			}
 			restore()
-			saved, err := c.load(c.selected)
+			saved, err := c.loadCredential(c.selected)
 			if err != nil {
 				t.Fatal(err)
 			}

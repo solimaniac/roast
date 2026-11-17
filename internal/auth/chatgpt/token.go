@@ -50,7 +50,7 @@ func (c *Client) Token(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("%w: no account selected; run roast chatgpt signin", ErrAuth)
 	}
 	var token string
-	err := c.locked(ctx, func() error {
+	err := c.withSessionLock(ctx, func() error {
 		var err error
 		token, err = c.selectedToken(ctx)
 		return err
@@ -63,7 +63,7 @@ func (c *Client) Token(ctx context.Context) (string, error) {
 
 // selectedToken runs under the session lock to serialize refresh rotation.
 func (c *Client) selectedToken(ctx context.Context) (string, error) {
-	v, err := c.load(c.selected)
+	v, err := c.loadCredential(c.selected)
 	if err != nil {
 		return "", err
 	}
@@ -94,7 +94,7 @@ func (c *Client) refresh(ctx context.Context, v credential) (string, error) {
 	if err != nil {
 		if oauth.InvalidRefreshGrant(err) {
 			v.clearTokens()
-			if err := c.save(v); err != nil {
+			if err := c.saveCredential(v); err != nil {
 				return "", err
 			}
 		}
@@ -103,7 +103,7 @@ func (c *Client) refresh(ctx context.Context, v credential) (string, error) {
 	// Rotation has consumed the old refresh token. Persist the new response
 	// before fetching JWKS so a later call can retry validation.
 	v.Pending = &pendingRefresh{Response: tokens, ReceivedAt: c.now()}
-	if err := c.save(v); err != nil {
+	if err := c.saveCredential(v); err != nil {
 		// The provider may have consumed the old refresh token. Best-effort
 		// invalidation prevents its reuse if storage becomes writable again now.
 		return "", c.rejectPending(&v, fmt.Errorf("ChatGPT refresh completed but its replacement could not be durably saved: %w", err))
@@ -154,7 +154,7 @@ func (c *Client) acceptPending(ctx context.Context, v *credential) error {
 		}
 	}
 	next.Pending = nil
-	if err := c.save(next); err != nil {
+	if err := c.saveCredential(next); err != nil {
 		return fmt.Errorf("could not persist validated ChatGPT credentials; repair credential storage and retry: %w", err)
 	}
 	*v = next
@@ -170,7 +170,7 @@ func (c *Client) rejectPending(v *credential, cause error) error {
 	v.Scopes = ""
 	v.ExpiresAt = time.Time{}
 	v.EarliestRefreshAt = 0
-	if err := c.save(*v); err != nil {
+	if err := c.saveCredential(*v); err != nil {
 		return fmt.Errorf("%w; could not confirm local credential cleanup (%v); repair credential storage, then run roast chatgpt signin --account CLIENT_ID before retrying", cause, err)
 	}
 	return fmt.Errorf("%w; local credentials cleared; run roast chatgpt signin --account CLIENT_ID", cause)

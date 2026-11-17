@@ -45,7 +45,7 @@ func TestRefreshMetadataDoesNotDiscardRotatedCredentials(t *testing.T) {
 			if token, err := c.Token(context.Background()); token != "" || !errors.Is(err, ErrNetwork) {
 				t.Fatalf("pending credentials escaped or response lost: %v", err)
 			}
-			v, err := c.load(c.selected)
+			v, err := c.loadCredential(c.selected)
 			if err != nil || v.Pending == nil || v.Pending.Response.RefreshToken != "rotated-refresh" || v.AccessToken != "access" {
 				t.Fatal("rotated credentials were not checkpointed")
 			}
@@ -53,7 +53,7 @@ func TestRefreshMetadataDoesNotDiscardRotatedCredentials(t *testing.T) {
 			if token, err := resumed.Token(context.Background()); err != nil || token != "rotated-access" || refreshes != 1 {
 				t.Fatalf("could not recover rotated credentials: %v", err)
 			}
-			v, err = c.load(c.selected)
+			v, err = c.loadCredential(c.selected)
 			if err != nil || v.Pending != nil || v.RefreshToken != "rotated-refresh" || v.Scopes != oauth.Scope {
 				t.Fatal("rotated credentials were not committed")
 			}
