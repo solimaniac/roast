@@ -39,12 +39,12 @@ func accountFixture(t *testing.T) (configPath, accountDir string, selectAccount 
 	t.Setenv("ROAST_NO_UPDATE_CHECK", "1")
 	t.Setenv("ROAST_NO_HOOK", "1")
 	t.Setenv("ROAST_RECORD_DIR", t.TempDir())
-	accountDir = filepath.Join(filepath.Dir(configPath), "chatgpt")
 	initial, err := chatgpt.New()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := initial.PrepareHost(t.Context()); err != nil {
+	hostID, accountDir, err := initial.PrepareHost(t.Context())
+	if err != nil {
 		t.Fatal(err)
 	}
 	write := func(name string, value any) {
@@ -52,12 +52,13 @@ func accountFixture(t *testing.T) (configPath, accountDir string, selectAccount 
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(accountDir, name), data, 0600); err != nil {
+		path := filepath.Join(accountDir, name)
+		if err := os.WriteFile(path, data, 0600); err != nil {
 			t.Fatal(err)
 		}
-		protectAccountFixture(t, filepath.Join(accountDir, name))
+		protectAccountFixture(t, path)
 	}
-	write("accounts.json", map[string]any{"active": "account-a", "clients": []string{"account-a", "account-b"}})
+	write("accounts.json", map[string]any{"host_id": hostID, "active": "account-a", "clients": []string{"account-a", "account-b"}})
 	for _, account := range []string{"account-a", "account-b"} {
 		write(fmt.Sprintf("%x.json", sha256.Sum256([]byte(account))), map[string]any{
 			"client_id": account, "subject": account,
