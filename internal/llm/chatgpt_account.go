@@ -3,7 +3,7 @@ package llm
 import (
 	"context"
 
-	"github.com/bluesky-social/roast/internal/chatgpt"
+	"github.com/bluesky-social/roast/internal/auth/chatgpt"
 )
 
 type chatGPTAccountKey struct{}

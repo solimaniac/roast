@@ -120,7 +120,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Test authentication and credential protection
-        run: go test -race ./internal/chatgpt/...
+        run: go test -race ./internal/auth/chatgpt/...
       - name: Test ChatGPT command and provider integration
         run: go test -race ./internal/cli ./internal/llm -run ChatGPT
       - name: Build

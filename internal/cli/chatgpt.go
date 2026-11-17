@@ -6,7 +6,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/bluesky-social/roast/internal/chatgpt"
+	"github.com/bluesky-social/roast/internal/auth/chatgpt"
 	"github.com/bluesky-social/roast/internal/textsafe"
 	"github.com/spf13/cobra"
 )

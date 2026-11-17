@@ -10,8 +10,8 @@ import (
 	"slices"
 	"time"
 
-	"github.com/bluesky-social/roast/internal/chatgpt/internal/loopback"
-	"github.com/bluesky-social/roast/internal/chatgpt/internal/oauth"
+	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/loopback"
+	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/oauth"
 )
 
 const signInTimeout = 30 * time.Minute

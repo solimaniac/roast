@@ -15,7 +15,7 @@ import (
 	fantasyopenai "charm.land/fantasy/providers/openai"
 	"github.com/charmbracelet/openai-go/option"
 
-	"github.com/bluesky-social/roast/internal/chatgpt"
+	"github.com/bluesky-social/roast/internal/auth/chatgpt"
 )
 
 const chatGPTBaseURL = chatgpt.APIBaseURL

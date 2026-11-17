@@ -11,8 +11,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/bluesky-social/roast/internal/chatgpt/internal/oauth"
-	"github.com/bluesky-social/roast/internal/chatgpt/internal/storage"
+	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/oauth"
+	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/storage"
 )
 
 type Account struct {

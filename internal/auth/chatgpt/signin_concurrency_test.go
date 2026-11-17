@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bluesky-social/roast/internal/chatgpt/internal/oauth"
-	"github.com/bluesky-social/roast/internal/chatgpt/internal/storage"
+	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/oauth"
+	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/storage"
 )
 
 // All OAuth traffic uses a synthetic transport; only the callback uses loopback.

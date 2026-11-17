@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bluesky-social/roast/internal/chatgpt/internal/oauth"
+	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/oauth"
 )
 
 func scopeValue(scope string) *string { return &scope }

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bluesky-social/roast/internal/chatgpt/internal/oauth"
+	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/oauth"
 )
 
 func TestRefreshMetadataDoesNotDiscardRotatedCredentials(t *testing.T) {

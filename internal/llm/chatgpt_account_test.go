@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/bluesky-social/roast/internal/chatgpt"
+	"github.com/bluesky-social/roast/internal/auth/chatgpt"
 )
 
 func TestChatGPTAccountSnapshotKeepsInitializationFailure(t *testing.T) {

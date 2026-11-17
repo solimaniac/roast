@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bluesky-social/roast/internal/chatgpt"
+	"github.com/bluesky-social/roast/internal/auth/chatgpt"
 	"github.com/bluesky-social/roast/internal/testutil"
 )
 
