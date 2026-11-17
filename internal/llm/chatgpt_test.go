@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -101,6 +102,9 @@ func TestChatGPTNativeToolLoop(t *testing.T) {
 	if err != nil || output.Answer != "done" || reads != 1 || len(requests) != 2 {
 		t.Fatalf("output=%+v reads=%d requests=%d err=%v", output, reads, len(requests), err)
 	}
+	if len(captures) != len(requests) {
+		t.Fatalf("captured responses = %d, want %d", len(captures), len(requests))
+	}
 	for i, req := range requests {
 		if req["store"] != false || req["stream"] != true || req["tool_choice"] != "auto" {
 			t.Fatalf("wrong request controls: %#v", req)
@@ -111,15 +115,22 @@ func TestChatGPTNativeToolLoop(t *testing.T) {
 		if _, exists := req["previous_response_id"]; exists {
 			t.Fatal("server-side history sent")
 		}
-		input, _ := json.Marshal(req["input"])
+		input, err := json.Marshal(req["input"])
+		if err != nil {
+			t.Fatal(err)
+		}
 		if !bytes.Contains(input, []byte("Exact Roast system prompt")) || !bytes.Contains(input, []byte(`"role":"developer"`)) {
 			t.Fatalf("prompt not preserved as developer message: %s", input)
 		}
 		if i == 1 && (!bytes.Contains(input, []byte("source file content")) || !bytes.Contains(input, []byte(`"namespace":"roast"`))) {
 			t.Fatalf("tool history not replayed: %s", input)
 		}
-		namespaces := req["tools"].([]any)
-		if len(namespaces) != 1 || namespaces[0].(map[string]any)["name"] != "roast" || namespaces[0].(map[string]any)["type"] != "namespace" {
+		namespaces, ok := req["tools"].([]any)
+		if !ok || len(namespaces) != 1 {
+			t.Fatalf("tools = %#v, want one namespace", req["tools"])
+		}
+		namespace, ok := namespaces[0].(map[string]any)
+		if !ok || namespace["name"] != "roast" || namespace["type"] != "namespace" {
 			t.Fatalf("tools not namespaced: %#v", namespaces)
 		}
 		if captures[i].Protocol != "chatgpt" || !bytes.Equal(captures[i].Body, expectedCapture[i]) {
@@ -138,25 +149,67 @@ func TestChatGPTRequestPreviewContract(t *testing.T) {
 	for _, field := range unsupported {
 		request[field] = "unsupported"
 	}
-	body, _ := json.Marshal(request)
+	body, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
 	got, err := chatGPTRequest(body)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var decoded map[string]any
-	_ = json.Unmarshal(got, &decoded)
+	if err := json.Unmarshal(got, &decoded); err != nil {
+		t.Fatalf("decode transformed request: %v", err)
+	}
 	for _, field := range unsupported {
 		if _, ok := decoded[field]; ok {
 			t.Fatalf("unsupported field %s survived", field)
 		}
 	}
-	if !bytes.Contains(got, []byte(`"additionalProperties":false`)) {
-		t.Fatal("tool schema lost constraints")
-	}
-	for _, bad := range []string{`null`, `{"input":"flat"}`, `{"input":null}`, `{"input":[],"tools":[{"type":"tool_search"}]}`} {
-		if _, err := chatGPTRequest([]byte(bad)); err == nil {
-			t.Fatalf("accepted %s", bad)
+	// Check the wire structure, not substrings that could occur in unrelated fields.
+	var contract struct {
+		Store   bool
+		Stream  bool
+		Include []string
+		Input   []struct{ Role, Content string }
+		Tools   []struct {
+			Type, Name string
+			Tools      []map[string]any
 		}
+	}
+	if err := json.Unmarshal(got, &contract); err != nil {
+		t.Fatal(err)
+	}
+	if contract.Store || !contract.Stream {
+		t.Errorf("store=%t stream=%t, want false/true", contract.Store, contract.Stream)
+	}
+	if !reflect.DeepEqual(contract.Include, []string{"reasoning.encrypted_content"}) {
+		t.Errorf("include = %v", contract.Include)
+	}
+	if len(contract.Input) != 1 || contract.Input[0].Role != "developer" || contract.Input[0].Content != "preserve" {
+		t.Errorf("input = %+v, want preserved developer message", contract.Input)
+	}
+	if len(contract.Tools) != 1 || contract.Tools[0].Type != "namespace" || contract.Tools[0].Name != "roast" {
+		t.Fatalf("tools = %+v, want Roast namespace", contract.Tools)
+	}
+	tools := contract.Tools[0].Tools
+	if len(tools) != 1 || !reflect.DeepEqual(tools[0], request["tools"].([]any)[0]) {
+		t.Errorf("nested tool schema = %+v, want original function schema", tools)
+	}
+}
+
+func TestChatGPTRequestRejectsInvalidInput(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"null request", `null`},
+		{"flat input", `{"input":"flat"}`},
+		{"null input", `{"input":null}`},
+		{"nonlocal tool", `{"input":[],"tools":[{"type":"tool_search"}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := chatGPTRequest([]byte(tc.body)); err == nil {
+				t.Fatalf("accepted invalid request %s", tc.body)
+			}
+		})
 	}
 }
 
@@ -268,13 +321,16 @@ func TestChatGPTAuthenticationRecoveryDoesNotSuggestAPIKeys(t *testing.T) {
 func TestChatGPTRejectsOverridesAndUnexpectedRoutes(t *testing.T) {
 	for _, cfg := range []ClientConfig{{APIKey: "secret"}, {BaseURL: "https://chatgpt.com/backend-api/codex"}, {SessionHeader: "X-Session"}} {
 		cfg.Protocol, cfg.Model, cfg.MaxOutputTokens = "chatgpt", "test", 100
-		if _, err := New(t.Context(), cfg); err == nil || strings.Contains(err.Error(), "secret") {
+		if _, err := New(t.Context(), cfg); err == nil || !strings.Contains(err.Error(), "not accepted") || strings.Contains(err.Error(), "secret") {
 			t.Fatalf("invalid config error=%v", err)
 		}
 	}
 	transport := &chatGPTTransport{token: func(context.Context) (string, error) { t.Fatal("retrieved token for wrong endpoint"); return "", nil }}
 	for _, endpoint := range []string{"https://wrong.invalid/v1/responses", chatGPTBaseURL + "/models", chatGPTBaseURL + "/responses?query=1"} {
-		req, _ := http.NewRequest(http.MethodPost, endpoint, strings.NewReader("{}"))
+		req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader("{}"))
+		if err != nil {
+			t.Fatal(err)
+		}
 		if _, err := transport.RoundTrip(req); err == nil {
 			t.Fatal("accepted wrong endpoint")
 		}
@@ -343,7 +399,9 @@ func TestChatGPTUsageCountsCachedInputOnce(t *testing.T) {
 		response["output"].([]any)[0].(map[string]any)["namespace"] = "roast"
 		response["usage"] = map[string]any{"input_tokens": 100, "input_tokens_details": map[string]any{"cached_tokens": 30}, "output_tokens": 10}
 		w := httptest.NewRecorder()
-		_ = testutil.WriteInferenceStream(w, "responses", response)
+		if err := testutil.WriteInferenceStream(w, "responses", response); err != nil {
+			return nil, err
+		}
 		return planResponse(w.Body.Bytes()), nil
 	}))
 	var out struct{ Answer string }
@@ -362,7 +420,9 @@ func TestChatGPTReplaysFinalizedReasoningInOriginalOrder(t *testing.T) {
 	c := planTestClient(t, ClientConfig{}, planRoundTripper(func(r *http.Request) (*http.Response, error) {
 		calls++
 		var request map[string]json.RawMessage
-		_ = json.NewDecoder(r.Body).Decode(&request)
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			return nil, err
+		}
 		if string(request["include"]) != `["reasoning.encrypted_content"]` {
 			t.Error("encrypted reasoning not requested")
 		}
@@ -370,17 +430,27 @@ func TestChatGPTReplaysFinalizedReasoningInOriginalOrder(t *testing.T) {
 		if calls == 2 {
 			tool, arguments = "submit", `{"answer":"done"}`
 			var input []json.RawMessage
-			_ = json.Unmarshal(request["input"], &input)
+			if err := json.Unmarshal(request["input"], &input); err != nil {
+				return nil, err
+			}
 			var replay []any
 			for _, raw := range input {
 				var item map[string]any
-				_ = json.Unmarshal(raw, &item)
+				if err := json.Unmarshal(raw, &item); err != nil {
+					return nil, err
+				}
 				if item["id"] == "reason-before" || item["id"] == "reason-after" || item["type"] == "function_call" {
 					replay = append(replay, item)
 				}
 			}
-			want, _ := json.Marshal(firstOutput)
-			got, _ := json.Marshal(replay)
+			want, err := json.Marshal(firstOutput)
+			if err != nil {
+				return nil, err
+			}
+			got, err := json.Marshal(replay)
+			if err != nil {
+				return nil, err
+			}
 			if !bytes.Equal(got, want) {
 				t.Fatalf("finalized raw output lost or reordered\ngot %s\nwant %s", got, want)
 			}
@@ -397,7 +467,9 @@ func TestChatGPTReplaysFinalizedReasoningInOriginalOrder(t *testing.T) {
 			response["output"] = firstOutput
 		}
 		w := httptest.NewRecorder()
-		_ = testutil.WriteInferenceStream(w, "responses", response)
+		if err := testutil.WriteInferenceStream(w, "responses", response); err != nil {
+			return nil, err
+		}
 		// Encrypted content is only final at output_item.done/completed in real
 		// streams. The SDK's metadata at item.added must not be the replay source.
 		stream := w.Body.String()

@@ -34,13 +34,27 @@ func TestChatGPTProfile(t *testing.T) {
 }
 
 func TestChatGPTRejectsProfileHTTPFields(t *testing.T) {
-	for _, p := range []InferenceProfile{
-		{BaseURL: "https://example.com"}, {BaseURL: "https://api.openai.com/v1"}, {APIKey: "secret"}, {APIKeyEnv: "MISSING_KEY"}, {SessionHeader: "X-Session"},
+	for _, tc := range []struct {
+		name    string
+		profile InferenceProfile
+	}{
+		{"custom endpoint", InferenceProfile{BaseURL: "https://example.com"}},
+		{"explicit default endpoint", InferenceProfile{BaseURL: "https://api.openai.com/v1"}},
+		{"literal key", InferenceProfile{APIKey: "secret"}},
+		{"key environment variable", InferenceProfile{APIKeyEnv: "MISSING_KEY"}},
+		{"session header", InferenceProfile{SessionHeader: "X-Session"}},
 	} {
-		p.Protocol, p.Model = "chatgpt", "gpt-test"
-		if _, err := normalizeProfile("test", p); err == nil || strings.Contains(err.Error(), "secret") {
-			t.Fatalf("unsafe validation: %v", err)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			profile := tc.profile
+			profile.Protocol, profile.Model = "chatgpt", "gpt-test"
+			_, err := normalizeProfile("test", profile)
+			if err == nil || !strings.Contains(err.Error(), "requires no endpoint") {
+				t.Fatalf("normalizeProfile error = %v, want managed-login field rejection", err)
+			}
+			if strings.Contains(err.Error(), "secret") {
+				t.Fatal("validation disclosed API key")
+			}
+		})
 	}
 }
 
@@ -60,16 +74,18 @@ func TestChatGPTRejectsRoleOverrides(t *testing.T) {
 func TestChatGPTCLIOverrides(t *testing.T) {
 	chatgpt := "chatgpt"
 	for _, kind := range []string{CredentialProviderEnv, CredentialProfileEnv, CredentialProfileKey, CredentialRoleEnv} {
-		role := ResolvedRole{Protocol: "responses", BaseURL: DefaultBaseURL("responses"), Model: "gpt-test", APIKey: "secret", MaxOutputTokens: 1024, Credential: CredentialSource{Kind: kind}}
-		role = OverrideEndpoint("finder", role, nil, &chatgpt)
-		err := ValidateRole("finder", role)
-		if kind == CredentialProviderEnv {
-			if err != nil || role.APIKey != "" || role.Credential.Kind != CredentialChatGPTLogin {
-				t.Fatalf("ambient override: %#v %v", role, err)
+		t.Run(kind, func(t *testing.T) {
+			role := ResolvedRole{Protocol: "responses", BaseURL: DefaultBaseURL("responses"), Model: "gpt-test", APIKey: "secret", MaxOutputTokens: 1024, Credential: CredentialSource{Kind: kind}}
+			role = OverrideEndpoint("finder", role, nil, &chatgpt)
+			err := ValidateRole("finder", role)
+			if kind == CredentialProviderEnv {
+				if err != nil || role.APIKey != "" || role.Credential.Kind != CredentialChatGPTLogin {
+					t.Fatalf("ambient override: %#v %v", role, err)
+				}
+			} else if err == nil {
+				t.Fatalf("accepted %s", kind)
 			}
-		} else if err == nil {
-			t.Fatalf("accepted %s", kind)
-		}
+		})
 	}
 	role := ResolvedRole{Protocol: "chatgpt", BaseURL: "https://api.openai.com/v1", Model: "gpt-test", MaxOutputTokens: 1024, Credential: CredentialSource{Kind: CredentialChatGPTLogin}}
 	for _, endpoint := range []string{"https://example.com", "https://api.openai.com/v1"} {

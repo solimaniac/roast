@@ -32,6 +32,10 @@ func TestChatGPTAccountSnapshotKeepsInitializationFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	operation := WithChatGPTAccount(t.Context())
+	initialErr := CheckChatGPTLogin(operation)
+	if initialErr == nil {
+		t.Fatal("invalid index did not fail initialization")
+	}
 	if err := os.WriteFile(index, []byte(`{"active":"account-b","clients":["account-b"]}`), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -40,13 +44,13 @@ func TestChatGPTAccountSnapshotKeepsInitializationFailure(t *testing.T) {
 	request, cancel := context.WithCancel(operation)
 	defer cancel()
 	cfg := ClientConfig{Protocol: "chatgpt", Model: "test-model", MaxOutputTokens: 100}
-	if _, err := New(request, cfg); !errors.Is(err, ErrAuth) {
+	if _, err := New(request, cfg); !errors.Is(err, ErrAuth) || !errors.Is(err, initialErr) {
 		t.Fatalf("original operation error = %v, want cached authentication failure", err)
 	}
-	if err := CheckChatGPTLogin(request); err == nil {
+	if err := CheckChatGPTLogin(request); !errors.Is(err, initialErr) {
 		t.Fatal("credential check forgot the original initialization failure")
 	}
-	if _, err := ChatGPTModels(request); err == nil {
+	if _, err := ChatGPTModels(request); !errors.Is(err, initialErr) {
 		t.Fatal("catalog check forgot the original initialization failure")
 	}
 	// Starting another operation captures the new selection even if its parent

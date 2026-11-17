@@ -14,11 +14,13 @@ func TestLiveChatGPTTwoTurnReview(t *testing.T) {
 	if liveEnv["ROAST_LIVE_CHATGPT"] != "1" {
 		t.Skip("set ROAST_LIVE_CHATGPT=1 after roast chatgpt signin to test the direct plan route")
 	}
+	ran := false
 	for _, model := range strings.Split(liveSetting("ROAST_LIVE_CHATGPT_MODELS", "gpt-6.1-sol"), ",") {
 		model = strings.TrimSpace(model)
 		if model == "" {
 			continue
 		}
+		ran = true
 		t.Run(model, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 			defer cancel()
@@ -46,5 +48,8 @@ func TestLiveChatGPTTwoTurnReview(t *testing.T) {
 			}
 			t.Logf("direct plan route passed: %d model calls", c.Usage().Calls)
 		})
+	}
+	if !ran {
+		t.Fatal("ROAST_LIVE_CHATGPT_MODELS contains no model slugs")
 	}
 }
