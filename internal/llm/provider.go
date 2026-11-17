@@ -196,6 +196,13 @@ type responseBody struct {
 	failure error
 }
 
+func (b *responseBody) recordFailure(err error) error {
+	if b != nil {
+		b.failure = err
+	}
+	return err
+}
+
 func (b *responseBody) close() error {
 	if b.body == nil {
 		return nil

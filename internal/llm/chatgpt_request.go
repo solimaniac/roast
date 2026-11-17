@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+
+	"charm.land/fantasy"
 )
 
 // The preview does not accept ordinary Responses defaults. Keep this boundary
 // explicit so SDK updates cannot accidentally enable storage or API billing.
-func chatGPTRequest(body []byte) ([]byte, error) {
+func encodeChatGPTRequest(body []byte, prompt fantasy.Prompt) ([]byte, error) {
 	var request map[string]json.RawMessage
 	if err := json.Unmarshal(body, &request); err != nil {
 		return nil, fmt.Errorf("decode ChatGPT request: %w", err)
@@ -24,21 +26,16 @@ func chatGPTRequest(body []byte) ([]byte, error) {
 		delete(request, key)
 	}
 	request["store"], request["stream"] = json.RawMessage("false"), json.RawMessage("true")
-	var input []map[string]json.RawMessage
-	if err := json.Unmarshal(request["input"], &input); err != nil || input == nil {
+	if input := request["input"]; len(input) == 0 || input[0] != '[' {
 		return nil, errors.New("ChatGPT input must be an array containing the conversation history")
 	}
-	for _, item := range input {
-		if string(item["role"]) == `"system"` {
-			item["role"] = json.RawMessage(`"developer"`)
-		}
-		if string(item["type"]) == `"function_call"` {
-			// Fantasy currently drops the namespace from function-call history.
-			// All calls admitted by the stream guard belong to this namespace.
-			item["namespace"] = json.RawMessage(`"roast"`)
-		}
+	// Fantasy drops finalized reasoning and tool namespaces while building its
+	// input. Use the prompt captured by chatGPTModel for every turn.
+	input, err := chatGPTInput(prompt)
+	if err != nil {
+		return nil, err
 	}
-	request["input"], _ = json.Marshal(input)
+	request["input"] = input
 	var tools []map[string]json.RawMessage
 	if raw := request["tools"]; len(raw) > 0 {
 		if err := json.Unmarshal(raw, &tools); err != nil {

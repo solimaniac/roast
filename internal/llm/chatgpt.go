@@ -1,15 +1,10 @@
 package llm
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"mime"
 	"net/http"
-	"strings"
 
 	fantasyopenai "charm.land/fantasy/providers/openai"
 	"github.com/charmbracelet/openai-go/option"
@@ -28,7 +23,7 @@ func newChatGPTClient(ctx context.Context, cfg ClientConfig) (Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: initialize Sign in with ChatGPT: %w", ErrAuth, err)
 	}
-	return chatGPTClient(ctx, cfg, auth.Token, http.DefaultTransport)
+	return newChatGPTResponsesClient(ctx, cfg, auth.Token, http.DefaultTransport)
 }
 
 func validateChatGPTConfig(cfg ClientConfig) error {
@@ -38,16 +33,11 @@ func validateChatGPTConfig(cfg ClientConfig) error {
 	return nil
 }
 
-// chatGPTClient keeps Roast's native Fantasy agent, prompt history, tool schemas,
-// execution policy, and response capture. The transport only applies the
-// documented ChatGPT plan-usage wire contract. There is no Codex harness.
-func chatGPTClient(ctx context.Context, cfg ClientConfig, token func(context.Context) (string, error), base http.RoundTripper) (Client, error) {
-	if err := validateChatGPTConfig(cfg); err != nil {
-		return nil, err
-	}
+// newChatGPTResponsesClient connects Fantasy's Responses model to the pinned account.
+// The outer transport records the same stream that the model consumes.
+func newChatGPTResponsesClient(ctx context.Context, cfg ClientConfig, token func(context.Context) (string, error), base http.RoundTripper) (Client, error) {
 	headers := sdkEnvironmentHeaders("responses")
-	capture := &captureTransport{cfg: cfg}
-	capture.base = &chatGPTTransport{base: base, token: token}
+	capture := &captureTransport{cfg: cfg, base: &chatGPTTransport{base: base, token: token}}
 	httpClient := &http.Client{Transport: capture, CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}}
@@ -73,92 +63,53 @@ func chatGPTClient(ctx context.Context, cfg ClientConfig, token func(context.Con
 	return &client{cfg: cfg, model: &chatGPTModel{LanguageModel: model}, transport: capture}, nil
 }
 
-type chatGPTTransport struct {
-	base  http.RoundTripper
-	token func(context.Context) (string, error)
+type chatGPTAccountKey struct{}
+
+// The client pins the registration, not its access token. Token refresh and
+// sign-out remain effective, but selection changes cannot redirect this work.
+// Keep the client private so callers cannot change its authentication state.
+type chatGPTAccountSnapshot struct {
+	client *chatgpt.Client
+	err    error
 }
 
-func (t *chatGPTTransport) RoundTrip(original *http.Request) (*http.Response, error) {
-	// Reject before retrieving a credential, including redirects and SDK
-	// surprises. This route must never become a configurable token proxy.
-	if original.Method != http.MethodPost || original.URL.String() != chatGPTBaseURL+"/responses" {
-		return nil, errors.New("chatgpt permits only POST https://api.openai.com/v1/responses")
+// WithChatGPTAccount captures the selected account for one operation. Call it
+// once after resolving the participating roles and before running any of them,
+// including when only a lazy verifier uses ChatGPT. A new call always captures
+// the current selection, even if ctx belongs to a previous operation.
+//
+// This reads only the registration index, without fetching tokens or making
+// network requests. Initialization errors are deferred until a ChatGPT role is
+// used, so an unused verifier cannot fail an otherwise successful review.
+func WithChatGPTAccount(ctx context.Context) context.Context {
+	client, err := chatgpt.New()
+	return context.WithValue(ctx, chatGPTAccountKey{}, chatGPTAccountSnapshot{client, err})
+}
+
+func chatGPTAccount(ctx context.Context) (*chatgpt.Client, error) {
+	if account, ok := ctx.Value(chatGPTAccountKey{}).(chatGPTAccountSnapshot); ok {
+		return account.client, account.err
 	}
-	owner, _ := original.Context().Value(responseBodyKey{}).(*responseBody)
-	fail := func(err error) error {
-		if owner != nil {
-			owner.failure = err
-		}
+	return chatgpt.New()
+}
+
+// CheckChatGPTLogin validates the operation's pinned account without exposing
+// its credentials. Callers without an operation snapshot use the current one.
+func CheckChatGPTLogin(ctx context.Context) error {
+	auth, err := chatGPTAccount(ctx)
+	if err != nil {
 		return err
 	}
-	body, err := io.ReadAll(io.LimitReader(original.Body, defaultInputByteCeiling*4+1))
-	_ = original.Body.Close()
+	_, err = auth.Token(ctx)
+	return err
+}
+
+// ChatGPTModels returns the catalog for the same account used by this
+// operation's inference requests and credential check.
+func ChatGPTModels(ctx context.Context) ([]chatgpt.Model, error) {
+	auth, err := chatGPTAccount(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if len(body) > defaultInputByteCeiling*4 {
-		return nil, fail(errors.New("ChatGPT request exceeds the bounded input size"))
-	}
-	if state, ok := original.Context().Value(chatGPTCallKey{}).(*chatGPTCall); ok {
-		body, err = chatGPTPromptRequest(body, state.prompt)
-		if err != nil {
-			return nil, fail(err)
-		}
-	}
-	body, err = chatGPTRequest(body)
-	if err != nil {
-		return nil, fail(err)
-	}
-	// Restoring finalized assistant output can make a small SDK request
-	// exceed the limit. Bound the actual wire body before reading credentials.
-	if len(body) > defaultInputByteCeiling*4 {
-		return nil, fail(errors.New("ChatGPT request exceeds the bounded input size"))
-	}
-	accessToken, err := t.token(original.Context())
-	if err != nil {
-		if errors.Is(err, chatgpt.ErrAuth) {
-			return nil, fail(fmt.Errorf("%w: %w", ErrAuth, err))
-		}
-		return nil, fail(fmt.Errorf("ChatGPT credential: %w", err))
-	}
-	if strings.TrimSpace(accessToken) == "" {
-		return nil, fail(fmt.Errorf("%w: no ChatGPT access token; run roast chatgpt signin", ErrAuth))
-	}
-	req := original.Clone(original.Context())
-	req.Body = io.NopCloser(bytes.NewReader(body))
-	req.ContentLength = int64(len(body))
-	req.GetBody = nil
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	// These headers have no role in this account's OAuth context.
-	req.Header.Del("OpenAI-Organization")
-	req.Header.Del("OpenAI-Project")
-	resp, err := t.base.RoundTrip(req)
-	if err != nil || resp == nil {
-		return resp, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		data, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		_ = resp.Body.Close()
-		if readErr != nil {
-			return nil, fail(readErr)
-		}
-		// Keep the original body shape, status, and request ID for diagnostics,
-		// but never retain an echoed bearer credential in a diagnostic.
-		data = bytes.ReplaceAll(data, []byte(accessToken), []byte("[redacted]"))
-		resp.Body = io.NopCloser(bytes.NewReader(data))
-		fail(newChatGPTError(resp.StatusCode, resp.Header.Get("X-Request-Id"), data))
-		return resp, nil
-	}
-	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
-	if mediaType != "text/event-stream" {
-		_ = resp.Body.Close()
-		return nil, fail(errors.New("ChatGPT returned a non-streaming response; no tools were executed"))
-	}
-	state, _ := original.Context().Value(chatGPTCallKey{}).(*chatGPTCall)
-	resp.Body = &chatGPTStreamBody{
-		call: state,
-		body: resp.Body, reader: bufio.NewReader(resp.Body), fail: fail,
-		requestID: resp.Header.Get("X-Request-Id"),
-	}
-	return resp, nil
+	return auth.Models(ctx)
 }
