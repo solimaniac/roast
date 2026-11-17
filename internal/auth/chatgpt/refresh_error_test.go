@@ -49,6 +49,9 @@ func TestMalformedOAuthErrorDoesNotEraseCredentials(t *testing.T) {
 		`{"error":{"code":"invalid_grant","code":42}}`,
 		`{"error":{"code":"invalid_grant","code":null}}`,
 		`{"error":"invalid_grant","extra":`,
+		`{"error":"invalid_grant"} trailing data`,
+		`{"error":"invalid_grant"}{}`,
+		`{"error":"invalid_grant"}` + strings.Repeat(" ", 1<<20),
 	} {
 		c := testClient(t)
 		seed(t, c, time.Now().Add(-time.Minute))

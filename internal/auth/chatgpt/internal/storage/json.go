@@ -1,3 +1,4 @@
+// Package storage provides private JSON files and cross-process locks for ChatGPT credentials.
 package storage
 
 import (

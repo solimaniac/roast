@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-func TestJWTValidation(t *testing.T) {
+func TestIDTokenValidation(t *testing.T) {
 	now := time.Date(2026, time.November, 1, 12, 0, 0, 0, time.UTC)
 	key := signingKey(t)
 	otherKey := signingKey(t)
@@ -21,6 +21,7 @@ func TestJWTValidation(t *testing.T) {
 		{name: "valid", nonce: "nonce"},
 		{name: "wrong issuer", nonce: "nonce", wantErr: true, mutate: func(v map[string]any) { v["iss"] = "https://evil.invalid" }},
 		{name: "wrong audience", nonce: "nonce", wantErr: true, mutate: func(v map[string]any) { v["aud"] = "other" }},
+		{name: "wrong authorized party", nonce: "nonce", wantErr: true, mutate: func(v map[string]any) { v["azp"] = "other" }},
 		{name: "expired", nonce: "nonce", wantErr: true, mutate: func(v map[string]any) { v["exp"] = now.Add(-time.Minute).Unix() }},
 		{name: "not yet valid", nonce: "nonce", wantErr: true, mutate: func(v map[string]any) { v["nbf"] = now.Add(time.Hour).Unix() }},
 		{name: "wrong nonce", nonce: "wrong", wantErr: true},

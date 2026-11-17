@@ -1,3 +1,4 @@
+// Package loopback receives a single OAuth callback on a local IPv4 listener.
 package loopback
 
 import (

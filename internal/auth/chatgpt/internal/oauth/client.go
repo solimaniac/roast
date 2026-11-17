@@ -1,3 +1,4 @@
+// Package oauth implements OpenAI's token, identity, and model catalog endpoints.
 package oauth
 
 import (
@@ -67,22 +68,19 @@ func (c Client) request(ctx context.Context, method, target string, form url.Val
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		var v struct {
-			Error json.RawMessage `json:"error"`
-		}
-		if json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&v) != nil {
-			v.Error = nil
-		}
-		requestID := ""
-		if values := resp.Header.Values("X-Request-Id"); len(values) == 1 {
-			requestID = requestIDForError(values[0])
-		}
-		return &oauthError{code: oauthResponseCategory(v.Error), status: resp.StatusCode, requestID: requestID}
+		return responseError(resp)
 	}
 	if out == nil {
 		return nil
 	}
-	if json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(out) != nil {
+	return readJSON(resp.Body, 2<<20, out)
+}
+
+// Read one complete document. In particular, a truncated or ambiguous error
+// response must never be treated as grounds to discard a refresh token.
+func readJSON(body io.Reader, limit int64, dst any) error {
+	data, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil || int64(len(data)) > limit || json.Unmarshal(data, dst) != nil {
 		return errors.New("invalid ChatGPT response")
 	}
 	return nil

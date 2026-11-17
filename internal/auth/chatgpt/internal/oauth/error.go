@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"regexp"
 )
 
@@ -55,12 +56,27 @@ type oauthError struct {
 	requestID string
 }
 
+func responseError(resp *http.Response) error {
+	failure := &oauthError{status: resp.StatusCode, code: "oauth_error"}
+	var body struct {
+		Error json.RawMessage `json:"error"`
+	}
+	if readJSON(resp.Body, 1<<20, &body) == nil {
+		failure.code = oauthResponseCategory(body.Error)
+	}
+	if values := resp.Header.Values("X-Request-Id"); len(values) == 1 {
+		failure.requestID = requestIDForError(values[0])
+	}
+	return failure
+}
+
 func (e *oauthError) Is(target error) bool {
 	if e.status >= 500 || e.status == 429 {
 		return target == ErrNetwork
 	}
 	return target == ErrAuth
 }
+
 func (e *oauthError) Error() string {
 	message := fmt.Sprintf("ChatGPT OAuth request failed (HTTP %d, %s)", e.status, ErrorCategory(e.code))
 	if requestID := requestIDForError(e.requestID); requestID != "" {
