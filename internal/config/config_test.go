@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bluesky-social/roast/internal/testutil"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -1224,4 +1225,9 @@ func clearProviderEnv(t *testing.T) {
 	} {
 		t.Setenv(name, "")
 	}
+}
+
+func TestMain(m *testing.M) {
+	testutil.ClearAmbientEnvironment()
+	os.Exit(m.Run())
 }

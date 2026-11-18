@@ -966,3 +966,8 @@ func TestWriteErrorEscapesControls(t *testing.T) {
 		t.Errorf("WriteError = %q", buf.String())
 	}
 }
+
+func TestMain(m *testing.M) {
+	testutil.ClearAmbientEnvironment()
+	os.Exit(m.Run())
+}

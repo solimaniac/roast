@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/bluesky-social/roast/internal/config"
+	"github.com/bluesky-social/roast/internal/testutil"
 )
 
 func TestS3CompatibleStoreUsesExplicitCredentialsAndContentAddressedKey(t *testing.T) {
@@ -220,4 +221,9 @@ func TestEnrollmentCreatesOwnerOnlyRecordRoot(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0o700 {
 		t.Fatalf("record root mode = %v, err=%v", info.Mode().Perm(), err)
 	}
+}
+
+func TestMain(m *testing.M) {
+	testutil.ClearAmbientEnvironment()
+	os.Exit(m.Run())
 }
