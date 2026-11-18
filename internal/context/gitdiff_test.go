@@ -2,7 +2,9 @@ package context
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -225,5 +227,46 @@ func TestGitDiffTool_PathEscapeRejected(t *testing.T) {
 	m := res.(map[string]any)
 	if _, ok := m["error"]; !ok {
 		t.Errorf("escaping path should have been rejected, got: %v", m)
+	}
+}
+
+// TestGitDiffReadersIgnoreUserDiffDrivers: git_diff and the survey range
+// grounder are patch-producing git calls too. A repository attribute naming
+// the user's textconv driver must not run it, and color or prefix settings
+// must not change the text they parse.
+func TestGitDiffReadersIgnoreUserDiffDrivers(t *testing.T) {
+	repo, rangeSpec := setupBranchRepo(t, "f.go", "package p\n// original\n", "package p\n// modified\n")
+	writeFile(t, repo, ".gitattributes", "*.go diff=pdf\n")
+	gitAdd(t, repo, ".")
+	gitCommit(t, repo, "route .go to the pdf driver")
+	rangeSpec = strings.SplitN(rangeSpec, "..", 2)[0] + ".." + gitOID(t, repo, "HEAD")
+
+	dir := t.TempDir()
+	ran := filepath.Join(dir, "driver-ran")
+	script := filepath.Join(dir, "driver.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ntouch '"+ran+"'\necho CONVERTED\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(dir, "gitconfig")
+	body := "[diff \"pdf\"]\n\ttextconv = " + script + "\n[diff]\n\texternal = " + script + "\n\tnoprefix = true\n[color]\n\tui = always\n"
+	if err := os.WriteFile(cfg, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", cfg)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+	res, err := GitDiffTool(repo, rangeSpec, []string{"f.go"}).Run(t.Context(), map[string]any{"path": "f.go"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, _ := res.(map[string]any)["content"].(string)
+	if strings.Contains(content, "CONVERTED") || strings.Contains(content, "\x1b") || !strings.Contains(content, "+++ b/f.go") || !strings.Contains(content, "+// modified") {
+		t.Errorf("git_diff did not return the plain diff: %q", content)
+	}
+	if !NewQuoteGrounder(repo, Tree{}, "", rangeSpec)("f.go", "// original") {
+		t.Error("the range grounder must parse the plain old side")
+	}
+	if _, err := os.Stat(ran); err == nil {
+		t.Error("a user diff driver ran on reviewed content")
 	}
 }

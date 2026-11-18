@@ -1,10 +1,15 @@
 package context
 
 import (
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
+
+	"github.com/bluesky-social/roast/internal/snapshot"
 )
 
 func TestQuoteGrounder(t *testing.T) {
@@ -214,5 +219,155 @@ func TestQuoteGrounderRangeSpec(t *testing.T) {
 	}
 	if g(".", "survivorBias := true") {
 		t.Error("a directory-cited finding must not ground via pathspec expansion")
+	}
+}
+
+// TestNormalizeWSMatchesFields pins the allocation-light normalizer to the
+// strings.Fields definition it replaced, including non-ASCII whitespace and
+// invalid UTF-8, and the streaming form to the whole-string form.
+func TestNormalizeWSMatchesFields(t *testing.T) {
+	alphabet := []string{"a", "é", " ", "\t", "\n", "\r", "\v", "\f", " ", "\u0085", " ", "　", "\xff", "\xe2\x80", "x", "\x00"}
+	rng := rand.New(rand.NewSource(1))
+	for i := 0; i < 2000; i++ {
+		var b strings.Builder
+		for j := rng.Intn(40); j > 0; j-- {
+			b.WriteString(alphabet[rng.Intn(len(alphabet))])
+		}
+		s := b.String()
+		want := strings.Join(strings.Fields(s), " ")
+		if got := normalizeWS(s); got != want {
+			t.Fatalf("normalizeWS(%q) = %q, want %q", s, got, want)
+		}
+		// Stream the same input in random chunks, splitting multi-byte runes.
+		var n wsNormalizer
+		var out strings.Builder
+		for rest := s; ; {
+			k := min(len(rest), rng.Intn(4))
+			n.write(&out, rest[:k], false)
+			rest = rest[k:]
+			if rest == "" {
+				n.write(&out, "", true)
+				break
+			}
+		}
+		if out.String() != want {
+			t.Fatalf("streamed normalize(%q) = %q, want %q", s, out.String(), want)
+		}
+	}
+}
+
+// referenceDiffSides is normalizedDiffSides as it was written before it
+// streamed: raw sides first, then strings.Fields.
+func referenceDiffSides(s string) string {
+	var oldSide, newSide strings.Builder
+	sentinel := func(b *strings.Builder) {
+		if b.Len() > 0 {
+			b.WriteString("\n\x00\n")
+		}
+	}
+	norm := func(s string) string { return strings.Join(strings.Fields(s), " ") }
+	inHunk := false
+	for l := range strings.SplitSeq(s, "\n") {
+		switch {
+		case strings.HasPrefix(l, "@@"):
+			sentinel(&oldSide)
+			sentinel(&newSide)
+			inHunk = true
+			continue
+		case strings.HasPrefix(l, "diff --git "):
+			inHunk = false
+			continue
+		}
+		if !inHunk || l == "" {
+			continue
+		}
+		switch l[0] {
+		case ' ':
+			oldSide.WriteString(l[1:] + "\n")
+			newSide.WriteString(l[1:] + "\n")
+		case '-':
+			oldSide.WriteString(l[1:] + "\n")
+		case '+':
+			newSide.WriteString(l[1:] + "\n")
+		}
+	}
+	o, n := norm(oldSide.String()), norm(newSide.String())
+	switch {
+	case o == "":
+		return n
+	case n == "":
+		return o
+	default:
+		return o + " \x00 " + n
+	}
+}
+
+func TestNormalizedDiffSidesMatchesReference(t *testing.T) {
+	lines := []string{"@@ -1 +1 @@", "diff --git a/x b/x", " ctx  line", "-old\tline", "+new line", "+", "-", " ", "+\xe2", "-\x80 tail", "\\ No newline at end of file", "", "+   ", "--- a/x", "+++ b/x"}
+	rng := rand.New(rand.NewSource(2))
+	for i := 0; i < 3000; i++ {
+		var parts []string
+		for j := rng.Intn(12); j > 0; j-- {
+			parts = append(parts, lines[rng.Intn(len(lines))])
+		}
+		s := strings.Join(parts, "\n")
+		if got, want := normalizedDiffSides(s), referenceDiffSides(s); got != want {
+			t.Fatalf("normalizedDiffSides(%q) = %q, want %q", s, got, want)
+		}
+	}
+}
+
+// TestGrounderBoundsHugeFiles: a quote from deep inside a file far larger
+// than the grounding cache still grounds (read_file can page to it), and
+// grounding a huge diff does not cost a multiple of its size in word slices.
+func TestGrounderBoundsHugeFiles(t *testing.T) {
+	repo := initRepo(t)
+	body := strings.Repeat("filler words here\n", (groundingCacheBytes/18)*2) + "func deepNeedle() {}\n"
+	writeFile(t, repo, "huge.txt", body)
+	gitAdd(t, repo, ".")
+	gitCommit(t, repo, "huge")
+	pin, err := snapshot.PinWorktree(repo, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tree := range []Tree{{}, PinnedWorktree(pin.Tree)} {
+		g := NewQuoteGrounder(repo, tree, "", "")
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		ok := g("huge.txt", "func   deepNeedle()\n{}")
+		runtime.ReadMemStats(&after)
+		if !ok {
+			t.Errorf("pinned=%v: a quote at the end of a huge file must ground", tree.Pinned())
+		}
+		if g("huge.txt", "func absentNeedle() {}") {
+			t.Errorf("pinned=%v: an absent quote grounded", tree.Pinned())
+		}
+		// Streaming converts each 64 KiB read once (about 1x the file in
+		// short-lived chunks); reading the file whole and normalizing it
+		// costs several times its size, and held all of it at once.
+		if alloc := after.TotalAlloc - before.TotalAlloc; alloc > uint64(len(body))*3/2 {
+			t.Errorf("pinned=%v: grounding allocated %d bytes for a %d-byte file", tree.Pinned(), alloc, len(body))
+		}
+	}
+
+	var diff strings.Builder
+	diff.WriteString("diff --git a/data.txt b/data.txt\nnew file mode 100644\n--- /dev/null\n+++ b/data.txt\n@@ -0,0 +1,1000000 @@\n")
+	for i := 0; i < 1_000_000; i++ {
+		diff.WriteString("+a b c d e f g h\n")
+	}
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	g := NewQuoteGrounder(repo, Tree{}, diff.String(), "")
+	runtime.ReadMemStats(&after)
+	// strings.Fields allocated a 16-byte header per word: 8 words per
+	// 17-byte line made it about 8x the diff before the join, on top of the
+	// raw copies. Normalizing into presized builders costs about 2x.
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 3*uint64(diff.Len()) {
+		t.Errorf("grounder construction allocated %d bytes for a %d-byte diff", alloc, diff.Len())
+	}
+	if !g("data.txt", "h a b c") {
+		t.Error("diff content must still ground")
 	}
 }
