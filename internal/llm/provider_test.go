@@ -1,17 +1,23 @@
 package llm
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"charm.land/fantasy"
 	"github.com/bluesky-social/roast/internal/testutil"
@@ -737,4 +743,1062 @@ func TestStreamCaptureEnforcesLimitWithoutContentLength(t *testing.T) {
 	if err := capture.Close(); !errors.As(err, &captureErr) || called || body.closes != 1 || capture.data.Len() > maxCapturedResponseSize {
 		t.Fatalf("close error=%v callback=%v closes=%d captured bytes=%d", err, called, body.closes, capture.data.Len())
 	}
+}
+
+// Exercise the real Fantasy/Anthropic SDK path, not a fake LanguageModel. The
+// production-sized ceiling must reach the native endpoint unchanged even though
+// the fixture produces only a few tokens. Either streaming or ordinary Messages
+// requests are acceptable; compatibility endpoints and smaller budgets are not.
+func TestAnthropicNativeMessagesPreservesOutputBudget(t *testing.T) {
+	for _, budget := range []int{1024, 32768} {
+		t.Run(strconv.Itoa(budget), func(t *testing.T) {
+			var calls, toolCalls atomic.Int32
+			var captured []RawResponse
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer r.Body.Close()
+				call := calls.Add(1)
+				if r.Method != http.MethodPost || r.URL.Path != "/v1/messages" || r.Header.Get("X-Api-Key") != "fixture-key" || r.Header.Get("Anthropic-Version") == "" {
+					t.Error("request did not use the native authenticated Messages endpoint")
+					http.Error(w, "native Messages required", http.StatusBadRequest)
+					return
+				}
+				var request struct {
+					Model      string            `json:"model"`
+					MaxTokens  int               `json:"max_tokens"`
+					Stream     bool              `json:"stream"`
+					System     json.RawMessage   `json:"system"`
+					Messages   json.RawMessage   `json:"messages"`
+					Tools      []json.RawMessage `json:"tools"`
+					ToolChoice struct {
+						Type string `json:"type"`
+					} `json:"tool_choice"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Errorf("decode native request: %v", err)
+					http.Error(w, "invalid JSON", http.StatusBadRequest)
+					return
+				}
+				if request.MaxTokens != budget || request.Model != "claude-test" || len(request.System) == 0 || len(request.Tools) == 0 {
+					t.Errorf("native request lost its budget/model/system/tools: %+v", request)
+					http.Error(w, "request configuration changed", http.StatusBadRequest)
+					return
+				}
+				if request.ToolChoice.Type != "auto" {
+					http.Error(w, "forced tool choice is not supported", http.StatusBadRequest)
+					return
+				}
+				tool, arguments := "read", `{"path":"fixture.go"}`
+				if call > 1 {
+					if !strings.Contains(string(request.Messages), "tool_result") || !strings.Contains(string(request.Messages), "package fixture") {
+						t.Error("native follow-up request lost the tool result")
+					}
+					tool, arguments = "submit", `{"answer":"done"}`
+				}
+				if err := writeAnthropicBudgetResponse(w, request.Stream, tool, arguments); err != nil {
+					t.Errorf("write native fixture response: %v", err)
+				}
+			}))
+			defer server.Close()
+
+			c, err := New(t.Context(), ClientConfig{
+				BaseURL: server.URL + "/v1", APIKey: "fixture-key", Model: "claude-test",
+				Protocol: "anthropic", MaxOutputTokens: budget, MaxAttempts: 1,
+				RequestTimeout: 10 * time.Minute,
+				CaptureResponse: func(response RawResponse) error {
+					captured = append(captured, response)
+					return nil
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out struct {
+				Answer string `json:"answer"`
+			}
+			err = c.Converse(t.Context(), "system", "user", ConverseOpts{
+				MaxTurns: 2, FinalTool: "submit",
+				Tools: []Tool{
+					{Name: "read", Description: "read a file", Schema: map[string]any{"type": "object"}, Run: func(context.Context, map[string]any) (any, error) {
+						toolCalls.Add(1)
+						return map[string]any{"content": "package fixture"}, nil
+					}},
+					{Name: "submit", Description: "return the result", Schema: map[string]any{
+						"type": "object", "properties": map[string]any{"answer": map[string]any{"type": "string"}},
+						"required": []string{"answer"},
+					}},
+				},
+			}, &out)
+			if err != nil {
+				t.Fatalf("native Anthropic run with max_tokens=%d failed after %d HTTP requests: %v", budget, calls.Load(), err)
+			}
+			if calls.Load() != 2 || toolCalls.Load() != 1 || out.Answer != "done" {
+				t.Fatalf("native run incomplete: HTTP requests=%d tool calls=%d answer=%q", calls.Load(), toolCalls.Load(), out.Answer)
+			}
+			if len(captured) != 2 || c.Usage().Calls != 2 {
+				t.Fatalf("captured=%d usage=%+v", len(captured), c.Usage())
+			}
+			for _, response := range captured {
+				if response.ContentType != "text/event-stream" || !strings.Contains(string(response.Body), "event: message_stop") {
+					t.Fatalf("native stream was not captured intact: %+v", response)
+				}
+			}
+		})
+	}
+}
+
+// Keep the acceptance test independent of the eventual timeout/streaming fix.
+func writeAnthropicBudgetResponse(w http.ResponseWriter, stream bool, tool, arguments string) error {
+	response := anthropicResponse(tool, arguments)
+	if !stream {
+		w.Header().Set("Content-Type", "application/json")
+		return json.NewEncoder(w).Encode(response)
+	}
+	return testutil.WriteInferenceStream(w, "anthropic", response)
+}
+
+// deepSeekThinkingServer emulates DeepSeek's thinking mode on its chat and
+// Anthropic-compatible endpoints: any forced tool choice is a 400, and every
+// earlier assistant turn must replay its reasoning when tools are present.
+type deepSeekThinkingServer struct {
+	t        *testing.T
+	protocol string
+	// respond returns the tool to call and its arguments for the nth request.
+	// An empty tool answers in prose; a non-empty finish overrides the
+	// natural finish reason.
+	respond func(request int) (tool, arguments, finish string)
+
+	mu      sync.Mutex
+	choices []string
+}
+
+const deepSeekToolChoiceError = `{"error":{"message":"Thinking mode does not support this tool_choice (request_id: fixture)","type":"invalid_request_error"}}`
+
+func newDeepSeekThinkingServer(t *testing.T, protocol string, respond func(int) (string, string, string)) (*httptest.Server, *deepSeekThinkingServer) {
+	d := &deepSeekThinkingServer{t: t, protocol: protocol, respond: respond}
+	server := httptest.NewServer(d)
+	t.Cleanup(server.Close)
+	return server, d
+}
+
+func (d *deepSeekThinkingServer) reject(w http.ResponseWriter, body string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadRequest)
+	_, _ = w.Write([]byte(body))
+}
+
+func (d *deepSeekThinkingServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		ToolChoice json.RawMessage   `json:"tool_choice"`
+		Tools      []json.RawMessage `json:"tools"`
+		Messages   []map[string]any  `json:"messages"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	d.mu.Lock()
+	d.choices = append(d.choices, string(request.ToolChoice))
+	call := len(d.choices)
+	d.mu.Unlock()
+
+	var choice any
+	_ = json.Unmarshal(request.ToolChoice, &choice)
+	auto := choice == nil || choice == "auto"
+	if object, ok := choice.(map[string]any); ok {
+		auto = object["type"] == "auto"
+	}
+	if !auto {
+		d.reject(w, deepSeekToolChoiceError)
+		return
+	}
+	for _, message := range request.Messages {
+		if message["role"] != "assistant" || len(request.Tools) == 0 {
+			continue
+		}
+		switch d.protocol {
+		case "chat":
+			if _, ok := message["reasoning_content"]; !ok {
+				d.reject(w, `{"error":{"message":"The reasoning_content in the thinking mode must be passed back to the API.","type":"invalid_request_error"}}`)
+				return
+			}
+		case "anthropic":
+			content, _ := message["content"].([]any)
+			var first map[string]any
+			if len(content) > 0 {
+				first, _ = content[0].(map[string]any)
+			}
+			if first["type"] != "thinking" {
+				d.reject(w, `{"type":"error","error":{"type":"invalid_request_error","message":"The content[].thinking in the thinking mode must be passed back to the API."}}`)
+				return
+			}
+		}
+	}
+
+	tool, arguments, finish := d.respond(call)
+	var response map[string]any
+	switch d.protocol {
+	case "chat":
+		message := map[string]any{"role": "assistant", "reasoning_content": "Thinking it through."}
+		natural := "stop"
+		if tool == "" {
+			message["content"] = "Here is my answer in prose."
+		} else {
+			natural = "tool_calls"
+			message["tool_calls"] = []any{map[string]any{
+				"id": fmt.Sprintf("call-%d", call), "type": "function",
+				"function": map[string]any{"name": tool, "arguments": arguments},
+			}}
+		}
+		if finish == "" {
+			finish = natural
+		}
+		response = map[string]any{
+			"id": "chat", "object": "chat.completion", "model": "deepseek-test",
+			"choices": []any{map[string]any{"index": 0, "finish_reason": finish, "message": message}},
+			"usage":   map[string]any{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+		}
+	case "anthropic":
+		content := []any{map[string]any{"type": "thinking", "thinking": "Thinking it through.", "signature": fmt.Sprintf("ds-%d", call)}}
+		natural := "end_turn"
+		if tool == "" {
+			content = append(content, map[string]any{"type": "text", "text": "Here is my answer in prose."})
+		} else {
+			natural = "tool_use"
+			content = append(content, toolUseBlock(fmt.Sprintf("toolu-%d", call), tool, arguments))
+		}
+		if finish == "" {
+			finish = natural
+		}
+		response = map[string]any{
+			"id": "msg", "type": "message", "role": "assistant", "model": "deepseek-test",
+			"content": content, "stop_reason": finish,
+			"usage": map[string]any{"input_tokens": 10, "output_tokens": 5},
+		}
+	}
+	_ = testutil.WriteInferenceStream(w, d.protocol, response)
+}
+
+func deepSeekClient(t *testing.T, server *httptest.Server, protocol string) *client {
+	t.Helper()
+	c, err := New(t.Context(), ClientConfig{
+		BaseURL: server.URL + "/v1", APIKey: "fixture-key", Model: "deepseek-test",
+		Protocol: protocol, MaxOutputTokens: 1024, MaxAttempts: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c.(*client)
+}
+
+// DeepSeek's thinking mode rejects forced tool choice, so every request a
+// review makes must leave tool selection automatic: exploration turns,
+// natural submissions, the single-call structured path, and each wrap-up.
+func TestDeepSeekThinkingModeUsesAutomaticToolChoice(t *testing.T) {
+	type answer struct {
+		Answer string `json:"answer"`
+	}
+	exploreThenSubmit := func(request int) (string, string, string) {
+		if request == 1 {
+			return "read", `{"path":"a.go"}`, ""
+		}
+		return "submit", `{"answer":"done"}`, ""
+	}
+	for _, protocol := range []string{"chat", "anthropic"} {
+		for _, mode := range []string{"two-turn", "wrap-up", "structured", "structured-retry", "deadline", "budget"} {
+			t.Run(protocol+"/"+mode, func(t *testing.T) {
+				respond := exploreThenSubmit
+				switch mode {
+				case "structured", "deadline", "budget":
+					respond = func(int) (string, string, string) { return "submit", `{"answer":"done"}`, "" }
+				case "structured-retry":
+					respond = func(request int) (string, string, string) {
+						if request == 1 {
+							return "", "", ""
+						}
+						return "submit", `{"answer":"done"}`, ""
+					}
+				}
+				server, fixture := newDeepSeekThinkingServer(t, protocol, respond)
+				c := deepSeekClient(t, server, protocol)
+				opts := ConverseOpts{MaxTurns: 4, FinalTool: "submit", Tools: basicTools(func(context.Context, map[string]any) (any, error) {
+					return "package a", nil
+				})}
+				switch mode {
+				case "wrap-up":
+					opts.MaxTurns = 2
+				case "deadline":
+					opts.WorkDeadline = time.Now().Add(-time.Second)
+				case "budget":
+					// Refuses exploration but admits the reserved wrap-up call.
+					c.cfg.Ledger = NewLedger(4000)
+				}
+				var out answer
+				var err error
+				if strings.HasPrefix(mode, "structured") {
+					err = c.CompleteStructured(t.Context(), "system", "user", "submit", &out)
+				} else {
+					err = c.Converse(t.Context(), "system", "user", opts, &out)
+				}
+				if err != nil || out.Answer != "done" {
+					t.Fatalf("answer=%q error=%v tool choices=%v", out.Answer, err, fixture.choices)
+				}
+			})
+		}
+	}
+}
+
+func TestDeepSeekFixtureRejectsForcedToolChoice(t *testing.T) {
+	for protocol, choices := range map[string][]string{
+		"chat":      {`"required"`, `{"type":"function","function":{"name":"submit"}}`},
+		"anthropic": {`{"type":"any"}`, `{"type":"tool","name":"submit"}`},
+	} {
+		server, _ := newDeepSeekThinkingServer(t, protocol, func(int) (string, string, string) { return "submit", `{}`, "" })
+		for _, choice := range choices {
+			resp, err := http.Post(server.URL+"/v1/messages", "application/json", strings.NewReader(`{"tool_choice":`+choice+`,"tools":[{}],"messages":[]}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var body strings.Builder
+			_, _ = io.Copy(&body, resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest || !strings.Contains(body.String(), "Thinking mode does not support this tool_choice") {
+				t.Fatalf("%s %s: status=%d body=%s", protocol, choice, resp.StatusCode, body.String())
+			}
+		}
+	}
+}
+
+// When a thinking model's turn ends without a usable submission, the error
+// must say why rather than only that the loop ended.
+func TestNoSubmissionNamesTheCause(t *testing.T) {
+	for _, protocol := range []string{"chat", "anthropic"} {
+		t.Run(protocol+"/truncated", func(t *testing.T) {
+			finish := "length"
+			if protocol == "anthropic" {
+				finish = "max_tokens"
+			}
+			server, _ := newDeepSeekThinkingServer(t, protocol, func(int) (string, string, string) { return "", "", finish })
+			var out struct{ Answer string }
+			err := deepSeekClient(t, server, protocol).CompleteStructured(t.Context(), "system", "user", "submit", &out)
+			if !errors.Is(err, ErrNoFinalCall) || !strings.Contains(err.Error(), `finish reason "length"`) || !strings.Contains(err.Error(), "max_output_tokens") {
+				t.Fatalf("error = %v, want the truncation named", err)
+			}
+		})
+		t.Run(protocol+"/prose", func(t *testing.T) {
+			server, _ := newDeepSeekThinkingServer(t, protocol, func(int) (string, string, string) { return "", "", "" })
+			var out struct{ Answer string }
+			err := deepSeekClient(t, server, protocol).CompleteStructured(t.Context(), "system", "user", "submit", &out)
+			if !errors.Is(err, ErrNoFinalCall) || !strings.Contains(err.Error(), "deepseek-test") || !strings.Contains(err.Error(), "2 submission attempts") || !strings.Contains(err.Error(), "without calling `submit`") {
+				t.Fatalf("error = %v, want the missing tool call named", err)
+			}
+		})
+	}
+	t.Run("provider-rejection", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(deepSeekToolChoiceError))
+		}))
+		defer server.Close()
+		c := deepSeekClient(t, server, "chat")
+		var out struct{ Answer string }
+		err := c.Converse(t.Context(), "system", "user", ConverseOpts{
+			MaxTurns: 4, FinalTool: "submit", WorkDeadline: time.Now().Add(-time.Second), Tools: basicTools(nil),
+		}, &out)
+		if !errors.Is(err, ErrWorkDeadline) || !strings.Contains(err.Error(), "Thinking mode does not support this tool_choice") {
+			t.Fatalf("error = %v, want the provider's error body", err)
+		}
+		if strings.HasPrefix(err.Error(), ErrNoFinalCall.Error()) || strings.Count(err.Error(), ErrNoFinalCall.Error()) > 1 {
+			t.Fatalf("error = %v, want the provider error ahead of a single generic sentinel", err)
+		}
+	})
+}
+
+// newReasoningOnlyServer answers every request the way a thinking model does
+// when its reasoning spends the whole output ceiling: reasoning content only,
+// no text and no tool call, then the given finish reason.
+func newReasoningOnlyServer(t *testing.T, protocol, finish, signature string) (*httptest.Server, *atomic.Int32) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		requests.Add(1)
+		var response map[string]any
+		switch protocol {
+		case "chat":
+			response = map[string]any{
+				"id": "chat", "object": "chat.completion", "model": "deepseek-test",
+				"choices": []any{map[string]any{"index": 0, "finish_reason": finish, "message": map[string]any{
+					"role": "assistant", "reasoning_content": "Checking each call site before deciding",
+				}}},
+				"usage": map[string]any{"prompt_tokens": 10, "completion_tokens": 256, "total_tokens": 266},
+			}
+		case "anthropic":
+			response = map[string]any{
+				"id": "msg", "type": "message", "role": "assistant", "model": "deepseek-test",
+				"content": []any{map[string]any{
+					"type": "thinking", "thinking": "Checking each call site before deciding", "signature": signature,
+				}},
+				"stop_reason": finish,
+				"usage":       map[string]any{"input_tokens": 10, "output_tokens": 256},
+			}
+		}
+		_ = testutil.WriteInferenceStream(w, protocol, response)
+	}))
+	t.Cleanup(server.Close)
+	return server, &requests
+}
+
+// A thinking model can spend its whole output ceiling on reasoning and stop
+// with a length finish before calling any tool. The error must name that
+// finish once and point at max_output_tokens, on the exploration turn and on
+// the single-call structured path, without spending retries on it.
+func TestReasoningOnlyLengthFinishNamesTheCeiling(t *testing.T) {
+	type variant struct{ protocol, finish, signature string }
+	for name, v := range map[string]variant{
+		"chat":               {"chat", "length", ""},
+		"anthropic/signed":   {"anthropic", "max_tokens", "ds-1"},
+		"anthropic/unsigned": {"anthropic", "max_tokens", ""},
+	} {
+		for _, mode := range []string{"converse", "structured"} {
+			t.Run(name+"/"+mode, func(t *testing.T) {
+				server, requests := newReasoningOnlyServer(t, v.protocol, v.finish, v.signature)
+				c := deepSeekClient(t, server, v.protocol)
+				var out struct {
+					Answer string `json:"answer"`
+				}
+				var err error
+				if mode == "structured" {
+					err = c.CompleteStructured(t.Context(), "system", "user", "submit", &out)
+				} else {
+					err = c.Converse(t.Context(), "system", "user", ConverseOpts{
+						MaxTurns: 4, FinalTool: "submit", Tools: basicTools(func(context.Context, map[string]any) (any, error) {
+							t.Error("exploration tool ran after a reasoning-only response")
+							return nil, nil
+						}),
+					}, &out)
+				}
+				if err == nil {
+					t.Fatal("reasoning-only response produced no error")
+				}
+				message := err.Error()
+				t.Logf("error: %s", message)
+				if !errors.Is(err, ErrNoFinalCall) || errors.Is(err, ErrEndpoint) {
+					t.Fatalf("error = %v, want a no-submission error, not an endpoint failure", err)
+				}
+				if !strings.Contains(message, "deepseek-test") || !strings.Contains(message, `finish reason "length"`) || !strings.Contains(message, "raise max_output_tokens") {
+					t.Fatalf("error = %v, want the length finish and the max_output_tokens hint", err)
+				}
+				if strings.Count(message, "finish reason") != 1 || strings.Count(message, "max_output_tokens") != 1 {
+					t.Fatalf("error = %v, want the cause stated once", err)
+				}
+				if got := requests.Load(); got != 1 {
+					t.Fatalf("requests = %d, want 1: a length finish is not retried", got)
+				}
+			})
+		}
+	}
+}
+
+// Fantasy maps finish reasons it does not model specifically, such as
+// DeepSeek's insufficient_system_resource, to a generic category. The error
+// must also name the provider's own reason, and only a length finish suggests
+// raising max_output_tokens.
+func TestAbnormalFinishNamesTheProviderReason(t *testing.T) {
+	for finish, category := range map[string]string{
+		"insufficient_system_resource": "error",
+		"content_filter":               "content-filter",
+		"unrecognized_reason":          "unknown",
+	} {
+		t.Run(finish, func(t *testing.T) {
+			server, _ := newReasoningOnlyServer(t, "chat", finish, "")
+			var out struct{ Answer string }
+			err := deepSeekClient(t, server, "chat").CompleteStructured(t.Context(), "system", "user", "submit", &out)
+			if err == nil {
+				t.Fatal("abnormal finish produced no error")
+			}
+			message := err.Error()
+			t.Logf("error: %s", message)
+			want := fmt.Sprintf("finish reason %q (the provider sent %q)", category, finish)
+			if !errors.Is(err, ErrNoFinalCall) || !strings.Contains(message, want) || strings.Count(message, finish) != 1 {
+				t.Fatalf("error = %v, want %s stated once", err, want)
+			}
+			if strings.Contains(message, "max_output_tokens") {
+				t.Fatalf("error = %v, want no output-ceiling hint for a non-length finish", err)
+			}
+		})
+	}
+}
+
+// bindingServer is a native Anthropic Messages fixture that enforces signed
+// thinking-block binding the way Claude 5.1+ models do: a block stays valid
+// only while the system prompt, the tool set, and every content block before
+// it are unchanged. Content is compared after a JSON round trip, so key order
+// and whitespace are ignored but any added, removed, edited, or reordered
+// block is a mismatch.
+type bindingServer struct {
+	t       *testing.T
+	respond func(request int) []any
+
+	mu       sync.Mutex
+	requests []bindingRequest
+	issued   map[string]string
+}
+
+type bindingRequest struct {
+	System     json.RawMessage `json:"system"`
+	Tools      json.RawMessage `json:"tools"`
+	ToolChoice json.RawMessage `json:"tool_choice"`
+	Messages   []struct {
+		Role    string            `json:"role"`
+		Content []json.RawMessage `json:"content"`
+	} `json:"messages"`
+}
+
+func newBindingServer(t *testing.T, respond func(request int) []any) *httptest.Server {
+	b := &bindingServer{t: t, respond: respond, issued: map[string]string{}}
+	server := httptest.NewServer(b)
+	t.Cleanup(server.Close)
+	return server
+}
+
+func canonicalJSON(t *testing.T, raw []byte) string {
+	t.Helper()
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Errorf("decode request JSON: %v", err)
+		return string(raw)
+	}
+	data, _ := json.Marshal(value)
+	return string(data)
+}
+
+func (b *bindingServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	var request bindingRequest
+	if err := json.Unmarshal(body, &request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.requests = append(b.requests, request)
+
+	var prefix bytes.Buffer
+	prefix.WriteString(canonicalJSON(b.t, request.System) + "\n" + canonicalJSON(b.t, request.Tools) + "\n")
+	for i, message := range request.Messages {
+		prefix.WriteString(message.Role + ":")
+		for j, block := range message.Content {
+			var head struct {
+				Type      string `json:"type"`
+				Signature string `json:"signature"`
+			}
+			_ = json.Unmarshal(block, &head)
+			if head.Type == "thinking" {
+				if want, ok := b.issued[head.Signature]; !ok || want != prefix.String() {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadRequest)
+					message := fmt.Sprintf("messages.%d.content.%d: Invalid `signature` in `thinking` block. The block is bound to a different conversation. Remove the block, or set `thinking.block_binding.prefix_mismatch_behavior` to \"drop_block\". That setting requires the `thinking-binding-controls-2026-08-01` value in the `anthropic-beta` header.", i, j)
+					_ = json.NewEncoder(w).Encode(map[string]any{"type": "error", "error": map[string]any{"type": "invalid_request_error", "message": message}})
+					return
+				}
+			}
+			prefix.WriteString(canonicalJSON(b.t, block) + "\n")
+		}
+	}
+
+	content := b.respond(len(b.requests))
+	prefix.WriteString("assistant:")
+	stop := "end_turn"
+	for _, raw := range content {
+		block := raw.(map[string]any)
+		switch block["type"] {
+		case "thinking":
+			signature := fmt.Sprintf("sig-%d", len(b.issued)+1)
+			block["signature"] = signature
+			b.issued[signature] = prefix.String()
+		case "tool_use":
+			stop = "tool_use"
+		}
+		data, _ := json.Marshal(block)
+		prefix.WriteString(canonicalJSON(b.t, data) + "\n")
+	}
+	_ = testutil.WriteInferenceStream(w, "anthropic", map[string]any{
+		"id": fmt.Sprintf("msg-%d", len(b.requests)), "type": "message", "role": "assistant", "model": "claude-test",
+		"content": content, "stop_reason": stop,
+		"usage": map[string]any{"input_tokens": 10, "output_tokens": 5},
+	})
+}
+
+func thinkingBlock(text string) map[string]any {
+	return map[string]any{"type": "thinking", "thinking": text}
+}
+
+func toolUseBlock(id, name, arguments string) map[string]any {
+	var input map[string]any
+	_ = json.Unmarshal([]byte(arguments), &input)
+	return map[string]any{"type": "tool_use", "id": id, "name": name, "input": input}
+}
+
+func bindingClient(t *testing.T, server *httptest.Server) Client {
+	t.Helper()
+	c, err := New(t.Context(), ClientConfig{
+		BaseURL: server.URL + "/v1", APIKey: "fixture-key", Model: "claude-test",
+		Protocol: "anthropic", MaxOutputTokens: 1024, MaxAttempts: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// Every follow-up request must replay what each signed thinking block was
+// produced under: the same system prompt, the same tools, and the same
+// earlier content, including any reminder Roast added to the conversation.
+func TestAnthropicReplayKeepsSignedThinkingPrefix(t *testing.T) {
+	readTool := func(reads *int) Tool {
+		return Tool{Name: "read", Description: "read a file", Schema: map[string]any{
+			"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}},
+		}, Run: func(_ context.Context, args map[string]any) (any, error) {
+			*reads++
+			return map[string]any{"content": "package " + fmt.Sprint(args["path"])}, nil
+		}}
+	}
+	submitTool := Tool{Name: "submit", Description: "return the result", Schema: map[string]any{
+		"type": "object", "properties": map[string]any{"answer": map[string]any{"type": "string"}},
+		"required": []string{"answer"},
+	}}
+	type answer struct {
+		Answer string `json:"answer"`
+	}
+
+	t.Run("structured-retry", func(t *testing.T) {
+		server := newBindingServer(t, func(request int) []any {
+			if request == 1 {
+				return []any{thinkingBlock(""), toolUseBlock("toolu-1", "submit", `{"answer":42}`)}
+			}
+			return []any{thinkingBlock(""), toolUseBlock("toolu-2", "submit", `{"answer":"done"}`)}
+		})
+		var out answer
+		if err := bindingClient(t, server).CompleteStructured(t.Context(), "system", "user", "submit", &out); err != nil || out.Answer != "done" {
+			t.Fatalf("answer=%q error=%v", out.Answer, err)
+		}
+	})
+
+	t.Run("wrap-up-turn", func(t *testing.T) {
+		server := newBindingServer(t, func(request int) []any {
+			if request == 1 {
+				return []any{thinkingBlock("look first"), toolUseBlock("toolu-1", "read", `{"path":"a"}`)}
+			}
+			return []any{thinkingBlock(""), toolUseBlock("toolu-2", "submit", `{"answer":"done"}`)}
+		})
+		var reads int
+		var out answer
+		err := bindingClient(t, server).Converse(t.Context(), "system", "user", ConverseOpts{
+			MaxTurns: 2, FinalTool: "submit", Tools: []Tool{readTool(&reads), submitTool},
+		}, &out)
+		if err != nil || out.Answer != "done" || reads != 1 {
+			t.Fatalf("answer=%q reads=%d error=%v", out.Answer, reads, err)
+		}
+	})
+
+	t.Run("interleaved-thinking", func(t *testing.T) {
+		server := newBindingServer(t, func(request int) []any {
+			if request == 1 {
+				return []any{
+					thinkingBlock("first"), toolUseBlock("toolu-a", "read", `{"path":"a"}`),
+					thinkingBlock("between tools"), toolUseBlock("toolu-b", "read", `{"path":"b"}`),
+				}
+			}
+			return []any{toolUseBlock("toolu-c", "submit", `{"answer":"done"}`)}
+		})
+		var reads int
+		var out answer
+		err := bindingClient(t, server).Converse(t.Context(), "system", "user", ConverseOpts{
+			MaxTurns: 4, FinalTool: "submit", Tools: []Tool{readTool(&reads), submitTool},
+		}, &out)
+		if err != nil || out.Answer != "done" || reads != 2 {
+			t.Fatalf("answer=%q reads=%d error=%v", out.Answer, reads, err)
+		}
+	})
+
+	t.Run("input-budget-warning", func(t *testing.T) {
+		server := newBindingServer(t, func(request int) []any {
+			if request < 3 {
+				return []any{thinkingBlock(""), toolUseBlock(fmt.Sprintf("toolu-%d", request), "read", `{"path":"a"}`)}
+			}
+			return []any{toolUseBlock("toolu-3", "submit", `{"answer":"done"}`)}
+		})
+		var reads int
+		var out answer
+		err := bindingClient(t, server).Converse(t.Context(), "system", "user", ConverseOpts{
+			MaxTurns: 6, FinalTool: "submit", InputByteCeiling: 1, Tools: []Tool{readTool(&reads), submitTool},
+		}, &out)
+		if err != nil || out.Answer != "done" {
+			t.Fatalf("answer=%q reads=%d error=%v", out.Answer, reads, err)
+		}
+	})
+
+	t.Run("wrap-up-records-result", func(t *testing.T) {
+		// Recording on the wrap-up turn runs and is replayed unchanged.
+		server := newBindingServer(t, func(request int) []any {
+			if request == 1 {
+				return []any{thinkingBlock("save it first"), toolUseBlock("toolu-1", "record", `{"note":"a"}`)}
+			}
+			return []any{thinkingBlock(""), toolUseBlock("toolu-2", "submit", `{"answer":"done"}`)}
+		})
+		var reads, records int
+		var out answer
+		err := bindingClient(t, server).Converse(t.Context(), "system", "user", ConverseOpts{
+			MaxTurns: 1, FinalTool: "submit", Tools: []Tool{readTool(&reads), {
+				Name: "record", Description: "record a note", RecordsResult: true,
+				Schema: map[string]any{"type": "object", "properties": map[string]any{"note": map[string]any{"type": "string"}}},
+				Run: func(context.Context, map[string]any) (any, error) {
+					records++
+					return map[string]any{"recorded": true}, nil
+				},
+			}, submitTool},
+		}, &out)
+		if err != nil || out.Answer != "done" || records != 1 || reads != 0 {
+			t.Fatalf("answer=%q records=%d reads=%d error=%v", out.Answer, records, reads, err)
+		}
+	})
+
+	t.Run("final-turn-exploration", func(t *testing.T) {
+		// The model ignores the wrap-up notice once. Its exploration call is
+		// answered, not executed, and the replay keeps the call it made.
+		server := newBindingServer(t, func(request int) []any {
+			if request == 1 {
+				return []any{thinkingBlock(""), toolUseBlock("toolu-1", "read", `{"path":"a"}`), thinkingBlock("after the call")}
+			}
+			return []any{toolUseBlock("toolu-2", "submit", `{"answer":"done"}`)}
+		})
+		var reads int
+		var out answer
+		err := bindingClient(t, server).Converse(t.Context(), "system", "user", ConverseOpts{
+			MaxTurns: 1, FinalTool: "submit", Tools: []Tool{readTool(&reads), submitTool},
+		}, &out)
+		if err != nil || out.Answer != "done" || reads != 0 {
+			t.Fatalf("answer=%q reads=%d error=%v", out.Answer, reads, err)
+		}
+	})
+}
+
+func TestBindingServerRejectsChangedPrefix(t *testing.T) {
+	server := newBindingServer(t, func(int) []any {
+		return []any{thinkingBlock(""), toolUseBlock("toolu-1", "read", `{}`)}
+	})
+	post := func(body string) (int, string) {
+		resp, err := http.Post(server.URL+"/v1/messages", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		data, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(data)
+	}
+	user := `{"role":"user","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}`
+	if code, _ := post(`{"system":[],"tools":[],"messages":[` + user + `]}`); code != http.StatusOK {
+		t.Fatalf("first request status = %d", code)
+	}
+	assistant := `{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"sig-1"},{"type":"tool_use","id":"toolu-1","name":"read","input":{}}]}`
+	result := `{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu-1","content":"x"}]}`
+	if code, body := post(`{"system":[],"tools":[],"messages":[` + user + `,` + assistant + `,` + result + `]}`); code != http.StatusOK {
+		t.Fatalf("unchanged replay status = %d: %s", code, body)
+	}
+	dropped := `{"role":"user","content":[{"type":"text","text":"a"}]}`
+	code, body := post(`{"system":[],"tools":[],"messages":[` + dropped + `,` + assistant + `,` + result + `]}`)
+	if code != http.StatusBadRequest || !strings.Contains(body, "messages.1.content.0: Invalid `signature` in `thinking` block") {
+		t.Fatalf("changed prefix status = %d: %s", code, body)
+	}
+}
+
+// Live tests run a minimal two-turn review loop against a real endpoint. They
+// are opt-in: each skips unless its ROAST_LIVE_*_API_KEY is set. Keys are
+// never logged; failures report only tool choices and provider findings.
+
+func liveSetting(name, fallback string) string {
+	if value := strings.TrimSpace(liveEnv[name]); value != "" {
+		return value
+	}
+	return fallback
+}
+
+// liveRecorder fronts the real endpoint. It records each request's tool
+// choice and, for native Anthropic, asks the API to report thinking blocks
+// whose bound prefix changed. With prefix_mismatch_behavior unset the request
+// is otherwise unchanged: accounts that enforce binding still reject it, and
+// accounts that do not list the block in input_transformations.
+type liveRecorder struct {
+	target      string
+	bindingBeta bool
+
+	mu          sync.Mutex
+	choices     []string
+	thinking    int
+	transformed []string
+}
+
+func (l *liveRecorder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	var request struct {
+		ToolChoice json.RawMessage `json:"tool_choice"`
+	}
+	_ = json.Unmarshal(body, &request)
+	l.mu.Lock()
+	l.choices = append(l.choices, string(request.ToolChoice))
+	l.mu.Unlock()
+
+	upstream, err := http.NewRequestWithContext(r.Context(), r.Method, l.target+strings.TrimPrefix(r.URL.Path, "/v1"), bytes.NewReader(body))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	upstream.Header = r.Header.Clone()
+	upstream.Header.Del("Accept-Encoding")
+	if l.bindingBeta {
+		upstream.Header.Add("anthropic-beta", "thinking-binding-controls-2026-08-01")
+	}
+	// Never follow a redirect: it would carry the live credential to another
+	// origin, which Roast's own client refuses to do.
+	resp, err := (&http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}).Do(upstream)
+	if err != nil {
+		http.Error(w, "upstream request failed", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		http.Error(w, "upstream read failed", http.StatusBadGateway)
+		return
+	}
+	if l.bindingBeta && resp.StatusCode == http.StatusOK {
+		l.inspectAnthropicStream(data)
+	}
+	for name, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(name, value)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(data)
+}
+
+func (l *liveRecorder) inspectAnthropicStream(data []byte) {
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 0, 64<<10), 16<<20)
+	for scanner.Scan() {
+		payload, ok := strings.CutPrefix(scanner.Text(), "data: ")
+		if !ok {
+			continue
+		}
+		var event struct {
+			Type    string `json:"type"`
+			Message struct {
+				InputTransformations []json.RawMessage `json:"input_transformations"`
+			} `json:"message"`
+			ContentBlock struct {
+				Type string `json:"type"`
+			} `json:"content_block"`
+		}
+		if json.Unmarshal([]byte(payload), &event) != nil {
+			continue
+		}
+		l.mu.Lock()
+		if event.Type == "content_block_start" && event.ContentBlock.Type == "thinking" {
+			l.thinking++
+		}
+		for _, entry := range event.Message.InputTransformations {
+			l.transformed = append(l.transformed, string(entry))
+		}
+		l.mu.Unlock()
+	}
+}
+
+// runLiveTwoTurn runs one exploration call, its replayed result, and the
+// submission on the reserved wrap-up turn: the path every review relies on.
+func runLiveTwoTurn(t *testing.T, cfg ClientConfig, recorder *liveRecorder) {
+	t.Helper()
+	server := httptest.NewServer(recorder)
+	defer server.Close()
+	cfg.BaseURL = server.URL + "/v1"
+	cfg.MaxOutputTokens = 1024
+	cfg.MaxAttempts = 2
+	cfg.RequestTimeout = 2 * time.Minute
+	c, err := New(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := rand.Text()
+	read := false
+	var out struct {
+		Primes int    `json:"primes"`
+		Token  string `json:"token"`
+	}
+	err = c.Converse(t.Context(),
+		// The arithmetic invites a thinking block on the first turn, which is
+		// what the replay check needs; adaptive models may still skip it.
+		"You are checking a tool loop. Before calling any tool, think carefully: how many of 2^31-1, 2^61-1, and 2^67-1 are prime? Then call read_note exactly once. Then call submit with primes set to that count and token set to the token read_note returned.",
+		"Begin.",
+		ConverseOpts{MaxTurns: 2, FinalTool: "submit", Tools: []Tool{
+			{Name: "read_note", Description: "Read the note that holds the token.", Schema: map[string]any{
+				"type": "object", "properties": map[string]any{}, "additionalProperties": false,
+			}, Run: func(context.Context, map[string]any) (any, error) {
+				read = true
+				return map[string]any{"token": token}, nil
+			}},
+			{Name: "submit", Description: "Submit the result.", Schema: reflectSchema(&out)},
+		}}, &out)
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	t.Logf("requests=%d thinking blocks=%d tool choices=%v", len(recorder.choices), recorder.thinking, recorder.choices)
+	if err != nil {
+		t.Fatalf("two-turn loop failed: %v", err)
+	}
+	if !read || out.Token != token || len(recorder.choices) < 2 {
+		t.Fatalf("tool result did not round-trip: read=%v token match=%v requests=%d", read, out.Token == token, len(recorder.choices))
+	}
+	for _, choice := range recorder.choices {
+		if choice != "" && choice != `"auto"` && !strings.Contains(choice, `"type":"auto"`) {
+			t.Fatalf("request forced tool choice %s", choice)
+		}
+	}
+	if len(recorder.transformed) > 0 {
+		t.Fatalf("API reported replayed thinking blocks bound to a different prefix: %v", recorder.transformed)
+	}
+	if recorder.bindingBeta && recorder.thinking == 0 {
+		t.Log("no thinking block this run, so the replay-binding check was vacuous")
+	}
+}
+
+func TestLiveAnthropicTwoTurnReview(t *testing.T) {
+	key := liveSetting("ROAST_LIVE_ANTHROPIC_API_KEY", "")
+	if key == "" {
+		t.Skip("set ROAST_LIVE_ANTHROPIC_API_KEY to run against a native Anthropic endpoint")
+	}
+	base := strings.TrimRight(liveSetting("ROAST_LIVE_ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1"), "/")
+	for _, model := range strings.Split(liveSetting("ROAST_LIVE_ANTHROPIC_MODELS", "claude-sonnet-5-5"), ",") {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			continue
+		}
+		t.Run(model, func(t *testing.T) {
+			runLiveTwoTurn(t, ClientConfig{Role: "finder", APIKey: key, Model: model, Protocol: "anthropic"},
+				&liveRecorder{target: base, bindingBeta: true})
+		})
+	}
+}
+
+func TestLiveDeepSeekTwoTurnReview(t *testing.T) {
+	key := liveSetting("ROAST_LIVE_DEEPSEEK_API_KEY", "")
+	if key == "" {
+		t.Skip("set ROAST_LIVE_DEEPSEEK_API_KEY to run against a DeepSeek endpoint")
+	}
+	base := strings.TrimRight(liveSetting("ROAST_LIVE_DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"), "/")
+	runLiveTwoTurn(t, ClientConfig{
+		Role: "finder", APIKey: key,
+		Model:    liveSetting("ROAST_LIVE_DEEPSEEK_MODEL", "deepseek-v4-pro"),
+		Protocol: liveSetting("ROAST_LIVE_DEEPSEEK_PROTOCOL", "chat"),
+	}, &liveRecorder{target: base})
+}
+
+// A thinking model given too small an output ceiling spends it on reasoning
+// and stops before calling a tool. The error must name the length finish and
+// the setting to raise, not report a generic failure.
+func TestLiveDeepSeekReasoningCeiling(t *testing.T) {
+	key := liveSetting("ROAST_LIVE_DEEPSEEK_API_KEY", "")
+	if key == "" {
+		t.Skip("set ROAST_LIVE_DEEPSEEK_API_KEY to run against a DeepSeek endpoint")
+	}
+	recorder := &liveRecorder{target: strings.TrimRight(liveSetting("ROAST_LIVE_DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"), "/")}
+	server := httptest.NewServer(recorder)
+	defer server.Close()
+	c, err := New(t.Context(), ClientConfig{
+		Role: "finder", APIKey: key, BaseURL: server.URL + "/v1",
+		Model:           liveSetting("ROAST_LIVE_DEEPSEEK_MODEL", "deepseek-v4-pro"),
+		Protocol:        liveSetting("ROAST_LIVE_DEEPSEEK_PROTOCOL", "chat"),
+		MaxOutputTokens: 256, MaxAttempts: 1, RequestTimeout: 2 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out struct {
+		Primes int `json:"primes"`
+	}
+	err = c.CompleteStructured(t.Context(),
+		"Before calling any tool, think carefully and at length: for each of 2^31-1, 2^61-1, and 2^67-1, decide whether it is prime and check your reasoning. Then call submit with primes set to that count.",
+		"Begin.", "submit", &out)
+	if err == nil {
+		t.Skipf("the model submitted within a 256-token ceiling (primes=%d), so the length path was not exercised", out.Primes)
+	}
+	t.Logf("error: %v", err)
+	if !errors.Is(err, ErrNoFinalCall) || !strings.Contains(err.Error(), `finish reason "length"`) || !strings.Contains(err.Error(), "raise max_output_tokens") {
+		t.Fatalf("error = %v, want the length finish named with the max_output_tokens hint", err)
+	}
+}
+
+// This is a deliberate opt-in to use Roast's separately authorized account.
+// It never accepts token environment variables or reads Codex credentials.
+func TestLiveChatGPTTwoTurnReview(t *testing.T) {
+	if liveEnv["ROAST_LIVE_CHATGPT"] != "1" {
+		t.Skip("set ROAST_LIVE_CHATGPT=1 after roast chatgpt signin to test the direct plan route")
+	}
+	ran := false
+	for _, model := range strings.Split(liveSetting("ROAST_LIVE_CHATGPT_MODELS", "gpt-6.1-sol"), ",") {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			continue
+		}
+		ran = true
+		t.Run(model, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
+			defer cancel()
+			c, err := New(ctx, ClientConfig{Protocol: "chatgpt", Model: model, MaxOutputTokens: 2048, MaxAttempts: 1, RequestTimeout: 2 * time.Minute})
+			if err != nil {
+				t.Fatal(err)
+			}
+			token := rand.Text()
+			read := false
+			var out struct {
+				Token string `json:"token"`
+			}
+			err = c.Converse(ctx, "Test a native function-tool loop. Call read_note once, then submit the token it returned.", "Begin the check.", ConverseOpts{MaxTurns: 2, FinalTool: "submit", Tools: []Tool{
+				{Name: "read_note", Description: "Read the diagnostic token.", Schema: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}, Run: func(context.Context, map[string]any) (any, error) {
+					read = true
+					return map[string]string{"token": token}, nil
+				}},
+				{Name: "submit", Description: "Submit the diagnostic token.", Schema: reflectSchema(&out)},
+			}}, &out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !read || out.Token != token || c.Usage().Calls < 2 {
+				t.Fatal("live native tool result did not round-trip")
+			}
+			t.Logf("direct plan route passed: %d model calls", c.Usage().Calls)
+		})
+	}
+	if !ran {
+		t.Fatal("ROAST_LIVE_CHATGPT_MODELS contains no model slugs")
+	}
+}
+
+// liveEnv holds the opt-in ROAST_LIVE_* settings. They are read before the
+// ambient environment is cleared, so no other test can see them.
+var liveEnv = map[string]string{}
+
+func TestMain(m *testing.M) {
+	for _, entry := range os.Environ() {
+		name, value, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(name, "ROAST_LIVE_") {
+			liveEnv[name] = value
+		}
+	}
+	testutil.ClearAmbientEnvironment()
+	os.Exit(m.Run())
 }
