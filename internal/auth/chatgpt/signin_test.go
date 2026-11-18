@@ -21,16 +21,17 @@ import (
 
 	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/oauth"
 	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/storage"
+	"github.com/bluesky-social/roast/internal/testutil"
 )
 
 func TestSignInCallbackAndPKCE(t *testing.T) {
 	c := testClient(t)
-	k := signingKey(t)
+	k := testutil.NewRSAKey(t)
 	var nonce, redirect, challenge string
 	c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
 		switch r.URL.String() {
 		case jwksURL:
-			return jsonResponse(http.StatusOK, jwks(k))
+			return jsonResponse(http.StatusOK, testutil.RS256KeySet(k))
 		case tokenURL:
 			if err := r.ParseForm(); err != nil {
 				return nil, err
@@ -46,7 +47,7 @@ func TestSignInCallbackAndPKCE(t *testing.T) {
 			if base64.RawURLEncoding.EncodeToString(sum[:]) != challenge {
 				t.Error("PKCE mismatch")
 			}
-			return jsonResponse(http.StatusOK, oauth.TokenResponse{AccessToken: "access", RefreshToken: "refresh", IDToken: signed(t, k, claims(nonce)), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600})
+			return jsonResponse(http.StatusOK, oauth.TokenResponse{AccessToken: "access", RefreshToken: "refresh", IDToken: testutil.SignRS256(t, k, claims(nonce)), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600})
 		default:
 			t.Fatal("unexpected destination")
 			return nil, nil
@@ -96,16 +97,16 @@ func TestSignInCallbackAndPKCE(t *testing.T) {
 
 func TestIdentityOnlyAndExplicitConsent(t *testing.T) {
 	c := testClient(t)
-	key := signingKey(t)
+	key := testutil.NewRSAKey(t)
 	var nonce string
 	c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.String() == jwksURL {
-			return jsonResponse(http.StatusOK, jwks(key))
+			return jsonResponse(http.StatusOK, testutil.RS256KeySet(key))
 		}
 		if r.URL.String() != tokenURL {
 			t.Fatal("wrong target")
 		}
-		return jsonResponse(http.StatusOK, oauth.TokenResponse{IDToken: signed(t, key, claims(nonce)), Scope: scopeValue("openid profile email")})
+		return jsonResponse(http.StatusOK, oauth.TokenResponse{IDToken: testutil.SignRS256(t, key, claims(nonce)), Scope: scopeValue("openid profile email")})
 	})
 	run := func(enable bool) {
 		t.Helper()
@@ -162,7 +163,7 @@ func TestIdentityOnlyAndExplicitConsent(t *testing.T) {
 
 func TestFailedInitialExchangePreservesPendingRegistration(t *testing.T) {
 	c := testClient(t)
-	key := signingKey(t)
+	key := testutil.NewRSAKey(t)
 	if err := c.saveIndex(index{HostID: "stable-host", Active: "oaiapp_existing", Clients: []string{"oaiapp_existing"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +175,7 @@ func TestFailedInitialExchangePreservesPendingRegistration(t *testing.T) {
 	exchanges := 0
 	c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.String() == jwksURL {
-			return jsonResponse(http.StatusOK, jwks(key))
+			return jsonResponse(http.StatusOK, testutil.RS256KeySet(key))
 		}
 		if r.URL.String() != tokenURL {
 			t.Fatal("unexpected OAuth destination")
@@ -189,7 +190,7 @@ func TestFailedInitialExchangePreservesPendingRegistration(t *testing.T) {
 		if exchanges == 1 {
 			return jsonResponse(http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
 		}
-		return jsonResponse(http.StatusOK, oauth.TokenResponse{AccessToken: "access", RefreshToken: "refresh", IDToken: signed(t, key, claims(nonce)), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600})
+		return jsonResponse(http.StatusOK, oauth.TokenResponse{AccessToken: "access", RefreshToken: "refresh", IDToken: testutil.SignRS256(t, key, claims(nonce)), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600})
 	})
 	show := func(raw string) error {
 		u, err := url.Parse(raw)
@@ -829,9 +830,9 @@ func mockSignInTransport(t *testing.T, key *rsa.PrivateKey) transportFunc {
 			id := r.Form.Get("client_id")
 			cl := claims(r.Form.Get("code")) // The fake code carries the test nonce.
 			cl["aud"] = id
-			return jsonResponse(http.StatusOK, oauth.TokenResponse{AccessToken: "authorized-" + id, RefreshToken: "authorized-refresh-" + id, IDToken: signed(t, key, cl), TokenType: "Bearer", ExpiresIn: 3600, Scope: scopeValue(oauth.Scope)})
+			return jsonResponse(http.StatusOK, oauth.TokenResponse{AccessToken: "authorized-" + id, RefreshToken: "authorized-refresh-" + id, IDToken: testutil.SignRS256(t, key, cl), TokenType: "Bearer", ExpiresIn: 3600, Scope: scopeValue(oauth.Scope)})
 		case jwksURL:
-			return jsonResponse(http.StatusOK, jwks(key))
+			return jsonResponse(http.StatusOK, testutil.RS256KeySet(key))
 		case discoveryURL:
 			return jsonResponse(http.StatusOK, map[string]string{"issuer": oauth.Issuer, "revocation_endpoint": oauth.Issuer + "/revoke"})
 		case oauth.Issuer + "/revoke":
@@ -923,7 +924,7 @@ func TestPendingSignInLeavesAccountOperationsAvailable(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			c := testClient(t)
 			seed(t, c, time.Now().Add(time.Hour))
-			c.provider.HTTP.Transport = mockSignInTransport(t, signingKey(t))
+			c.provider.HTTP.Transport = mockSignInTransport(t, testutil.NewRSAKey(t))
 			id := ""
 			if existing {
 				id = "account-b"
@@ -969,7 +970,7 @@ func TestPendingSignInLeavesAccountOperationsAvailable(t *testing.T) {
 func TestPendingSignInPreservesExplicitReselection(t *testing.T) {
 	c := testClient(t)
 	seed(t, c, time.Now().Add(time.Hour))
-	c.provider.HTTP.Transport = mockSignInTransport(t, signingKey(t))
+	c.provider.HTTP.Transport = mockSignInTransport(t, testutil.NewRSAKey(t))
 	auth, done := beginMockSignIn(t, c, "")
 	if err := c.Select(context.Background(), c.selected); err != nil {
 		t.Fatal(err)
@@ -988,7 +989,7 @@ func TestConcurrentSignInsMergeRegistrationsAndSelection(t *testing.T) {
 	c := testClient(t)
 	seed(t, c, time.Now().Add(time.Hour))
 	addMockAccount(t, c, "account-b")
-	c.provider.HTTP.Transport = mockSignInTransport(t, signingKey(t))
+	c.provider.HTTP.Transport = mockSignInTransport(t, testutil.NewRSAKey(t))
 	first, firstDone := beginMockSignIn(t, c, "account-b")
 	other := *c
 	second, secondDone := beginMockSignIn(t, &other, "")
@@ -1012,7 +1013,7 @@ func TestSignInRejectsConcurrentCredentialChange(t *testing.T) {
 			t.Run(phase+"/"+mutation, func(t *testing.T) {
 				c := testClient(t)
 				seed(t, c, time.Now().Add(-time.Minute))
-				base := mockSignInTransport(t, signingKey(t))
+				base := mockSignInTransport(t, testutil.NewRSAKey(t))
 				exchanging := make(chan struct{})
 				release := make(chan struct{})
 				var exchanges atomic.Int32
@@ -1096,7 +1097,7 @@ func TestOverlappingAuthorizationUsesIndependentLock(t *testing.T) {
 			seed(t, c, time.Now().Add(time.Hour))
 			exchanging := make(chan struct{})
 			release := make(chan struct{})
-			base := mockSignInTransport(t, signingKey(t))
+			base := mockSignInTransport(t, testutil.NewRSAKey(t))
 			c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
 				if r.URL.String() == tokenURL {
 					close(exchanging)
@@ -1149,7 +1150,7 @@ func TestOverlappingAuthorizationUsesIndependentLock(t *testing.T) {
 func TestPendingRegistrationSignOutPreventsActivation(t *testing.T) {
 	c := testClient(t)
 	seed(t, c, time.Now().Add(time.Hour))
-	base := mockSignInTransport(t, signingKey(t))
+	base := mockSignInTransport(t, testutil.NewRSAKey(t))
 	exchanging := make(chan struct{})
 	release := make(chan struct{})
 	c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
@@ -1194,7 +1195,7 @@ func TestSignInRejectsChangedHost(t *testing.T) {
 		t.Run(phase, func(t *testing.T) {
 			c := testClient(t)
 			seed(t, c, time.Now().Add(time.Hour))
-			base := mockSignInTransport(t, signingKey(t))
+			base := mockSignInTransport(t, testutil.NewRSAKey(t))
 			exchanging := make(chan struct{})
 			release := make(chan struct{})
 			var exchanges atomic.Int32
@@ -1298,7 +1299,7 @@ func TestSignInTokenExpiryAnchoredToReceipt(t *testing.T) {
 	var clock atomic.Int64
 	clock.Store(received.Unix())
 	c.now = func() time.Time { return time.Unix(clock.Load(), 0).UTC() }
-	base := mockSignInTransport(t, signingKey(t))
+	base := mockSignInTransport(t, testutil.NewRSAKey(t))
 	c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.String() == jwksURL {
 			clock.Store(received.Add(2 * time.Minute).Unix())
@@ -1338,7 +1339,7 @@ func writeSelectionVersion(t *testing.T, c *Client, version uint64) uint64 {
 func TestPendingSignInPreservesLegacyReselection(t *testing.T) {
 	c := testClient(t)
 	seed(t, c, time.Now().Add(time.Hour))
-	c.provider.HTTP.Transport = mockSignInTransport(t, signingKey(t))
+	c.provider.HTTP.Transport = mockSignInTransport(t, testutil.NewRSAKey(t))
 	auth, done := beginMockSignIn(t, c, "")
 	// An older binary writes no version when explicitly reselecting A.
 	if previous := writeSelectionVersion(t, c, 0); previous == 0 {
@@ -1359,7 +1360,7 @@ func TestPendingSignInPreservesLegacyReselectionAcrossAnotherSignIn(t *testing.T
 	seed(t, c, time.Now().Add(time.Hour))
 	addMockAccount(t, c, "account-b")
 	addMockAccount(t, c, "account-c")
-	c.provider.HTTP.Transport = mockSignInTransport(t, signingKey(t))
+	c.provider.HTTP.Transport = mockSignInTransport(t, testutil.NewRSAKey(t))
 	writeSelectionVersion(t, c, 1)
 	// B snapshots (A, 1), then an older binary explicitly reselects A and
 	// drops the revision. C begins authorizing and initializes that revision.
@@ -1394,7 +1395,7 @@ func TestPendingSignInPreservesLegacyReselectionAcrossSelect(t *testing.T) {
 	c := testClient(t)
 	seed(t, c, time.Now().Add(time.Hour))
 	addMockAccount(t, c, "account-b")
-	c.provider.HTTP.Transport = mockSignInTransport(t, signingKey(t))
+	c.provider.HTTP.Transport = mockSignInTransport(t, testutil.NewRSAKey(t))
 	// Begin with a legacy index. Select used to create revision 1 here.
 	if err := c.Select(context.Background(), c.selected); err != nil {
 		t.Fatal(err)
@@ -1441,7 +1442,7 @@ func TestSelectionWritePathsUseFreshRevisions(t *testing.T) {
 				c := testClient(t)
 				seed(t, c, time.Now().Add(time.Hour))
 				addMockAccount(t, c, "account-b")
-				c.provider.HTTP.Transport = mockSignInTransport(t, signingKey(t))
+				c.provider.HTTP.Transport = mockSignInTransport(t, testutil.NewRSAKey(t))
 				signedIn, err := c.loadCredential(c.selected)
 				if err != nil {
 					t.Fatal(err)

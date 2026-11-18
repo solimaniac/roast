@@ -1,20 +1,22 @@
-package chatgpt
+package oauth
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"testing"
 	"time"
 
-	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/oauth"
+	"github.com/bluesky-social/roast/internal/testutil"
 )
 
 func TestIDTokenValidation(t *testing.T) {
 	now := time.Date(2026, time.November, 1, 12, 0, 0, 0, time.UTC)
-	key := signingKey(t)
-	otherKey := signingKey(t)
+	key := testutil.NewRSAKey(t)
+	otherKey := testutil.NewRSAKey(t)
 	tests := []struct {
 		name     string
 		mutate   func(map[string]any)
@@ -39,16 +41,19 @@ func TestIDTokenValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := testClient(t)
-			c.now = func() time.Time { return now }
-			c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
-				if r.URL.String() != jwksURL {
-					t.Errorf("JWKS URL = %q, want %q", r.URL, jwksURL)
+			c := NewClient()
+			c.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+				const wantURL = "https://auth.openai.com/.well-known/jwks.json"
+				if r.URL.String() != wantURL {
+					t.Errorf("JWKS URL = %q, want %q", r.URL, wantURL)
 				}
-				return jsonResponse(http.StatusOK, jwks(key))
+				body, err := json.Marshal(testutil.RS256KeySet(key))
+				if err != nil {
+					return nil, err
+				}
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body))}, nil
 			})
-			payload := claims("nonce")
-			payload["iat"], payload["exp"] = now.Unix(), now.Add(time.Hour).Unix()
+			payload := idTokenClaims(now)
 			if tt.mutate != nil {
 				tt.mutate(payload)
 			}
@@ -56,9 +61,9 @@ func TestIDTokenValidation(t *testing.T) {
 			if tt.wrongKey {
 				signing = otherKey
 			}
-			token := signed(t, signing, payload)
+			token := testutil.SignRS256(t, signing, payload)
 
-			identity, err := c.provider.ValidateID(t.Context(), token, "oaiapp_test", tt.nonce, c.now)
+			identity, err := c.ValidateID(t.Context(), token, "oaiapp_test", tt.nonce, func() time.Time { return now })
 
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("ValidateID error = %v, want error = %t", err, tt.wantErr)
@@ -71,19 +76,30 @@ func TestIDTokenValidation(t *testing.T) {
 }
 
 func TestIDTokenRejectsUnsignedBeforeFetchingKeys(t *testing.T) {
-	c := testClient(t)
-	c.provider.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
+	c := NewClient()
+	c.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
 		t.Error("requested signing keys for an unsigned token")
 		return nil, errors.New("unexpected key request")
 	})
-	payload, err := json.Marshal(claims("nonce"))
+	payload, err := json.Marshal(idTokenClaims(time.Now()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	encode := base64.RawURLEncoding.EncodeToString
 	token := encode([]byte(`{"alg":"none","kid":"test"}`)) + "." + encode(payload) + "."
-	_, err = c.provider.ValidateID(t.Context(), token, "oaiapp_test", "nonce", c.now)
-	if !errors.Is(err, oauth.ErrInvalidID) {
+	_, err = c.ValidateID(t.Context(), token, "oaiapp_test", "nonce", time.Now)
+	if !errors.Is(err, ErrInvalidID) {
 		t.Fatalf("ValidateID returned %v for an unsigned token", err)
+	}
+}
+
+func idTokenClaims(now time.Time) map[string]any {
+	return map[string]any{
+		"iss":   Issuer,
+		"sub":   "subject",
+		"aud":   "oaiapp_test",
+		"exp":   now.Add(time.Hour).Unix(),
+		"iat":   now.Unix(),
+		"nonce": "nonce",
 	}
 }

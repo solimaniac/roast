@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/bluesky-social/roast/internal/auth/chatgpt/internal/oauth"
+	"github.com/bluesky-social/roast/internal/testutil"
 )
 
 func TestRefreshSerializedAndRotated(t *testing.T) {
@@ -134,19 +135,19 @@ func TestNetworkErrorDoesNotClearTokens(t *testing.T) {
 func TestRefreshPendingSurvivesJWKSFailure(t *testing.T) {
 	c := testClient(t)
 	seed(t, c, time.Now().Add(-time.Minute))
-	key := signingKey(t)
+	key := testutil.NewRSAKey(t)
 	var refreshes, fetches int
 	c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
 		switch r.URL.String() {
 		case tokenURL:
 			refreshes++
-			return jsonResponse(http.StatusOK, oauth.TokenResponse{AccessToken: "rotated-access", RefreshToken: "rotated-refresh", IDToken: signed(t, key, claims("")), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600})
+			return jsonResponse(http.StatusOK, oauth.TokenResponse{AccessToken: "rotated-access", RefreshToken: "rotated-refresh", IDToken: testutil.SignRS256(t, key, claims("")), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600})
 		case jwksURL:
 			fetches++
 			if fetches == 1 {
 				return nil, errors.New("temporary JWKS failure")
 			}
-			return jsonResponse(http.StatusOK, jwks(key))
+			return jsonResponse(http.StatusOK, testutil.RS256KeySet(key))
 		default:
 			t.Fatal("unexpected request")
 			return nil, nil
@@ -176,14 +177,14 @@ func TestRefreshPendingSurvivesJWKSFailure(t *testing.T) {
 func TestPendingWrongIdentityNeverExposed(t *testing.T) {
 	c := testClient(t)
 	seed(t, c, time.Now().Add(-time.Minute))
-	key := signingKey(t)
+	key := testutil.NewRSAKey(t)
 	v, err := c.loadCredential(c.selected)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cl := claims("")
 	cl["sub"] = "different"
-	v.Pending = &pendingRefresh{Response: oauth.TokenResponse{AccessToken: "wrong-account", RefreshToken: "new-refresh", IDToken: signed(t, key, cl), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600}, ReceivedAt: time.Now()}
+	v.Pending = &pendingRefresh{Response: oauth.TokenResponse{AccessToken: "wrong-account", RefreshToken: "new-refresh", IDToken: testutil.SignRS256(t, key, cl), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600}, ReceivedAt: time.Now()}
 	if err := c.saveCredential(&v); err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +198,7 @@ func TestPendingWrongIdentityNeverExposed(t *testing.T) {
 			return nil, errors.New("unexpected request instead of JWKS validation")
 		}
 		jwksCalls++
-		return jsonResponse(http.StatusOK, jwks(key))
+		return jsonResponse(http.StatusOK, testutil.RS256KeySet(key))
 	})
 
 	token, err := c.Token(t.Context())
@@ -233,7 +234,7 @@ func TestPendingRefreshDelayedPastIDExpiry(t *testing.T) {
 			now := received.Add(tt.delay)
 			c.now = func() time.Time { return now }
 			seed(t, c, received.Add(-time.Minute))
-			key := signingKey(t)
+			key := testutil.NewRSAKey(t)
 			cl := claims("")
 			cl["iat"] = received.Unix()
 			cl["exp"] = received.Add(10 * time.Minute).Unix()
@@ -241,7 +242,7 @@ func TestPendingRefreshDelayedPastIDExpiry(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			v.Pending = &pendingRefresh{Response: oauth.TokenResponse{AccessToken: "pending-access", RefreshToken: "pending-refresh", IDToken: signed(t, key, cl), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600}, ReceivedAt: received}
+			v.Pending = &pendingRefresh{Response: oauth.TokenResponse{AccessToken: "pending-access", RefreshToken: "pending-refresh", IDToken: testutil.SignRS256(t, key, cl), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600}, ReceivedAt: received}
 			if err := c.saveCredential(&v); err != nil {
 				t.Fatal(err)
 			}
@@ -249,7 +250,7 @@ func TestPendingRefreshDelayedPastIDExpiry(t *testing.T) {
 			c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
 				switch r.URL.String() {
 				case jwksURL:
-					return jsonResponse(http.StatusOK, jwks(key))
+					return jsonResponse(http.StatusOK, testutil.RS256KeySet(key))
 				case tokenURL:
 					refreshes++
 					if err := r.ParseForm(); err != nil {
@@ -296,7 +297,7 @@ func TestPendingRefreshRejectsPermanentFailures(t *testing.T) {
 			c.now = func() time.Time { return now }
 			seed(t, c, now.Add(-time.Minute))
 			received := now.Add(-time.Hour)
-			key := signingKey(t)
+			key := testutil.NewRSAKey(t)
 			cl := claims("")
 			cl["iat"] = received.Add(-time.Minute).Unix()
 			cl["exp"] = received.Add(time.Minute).Unix()
@@ -314,12 +315,12 @@ func TestPendingRefreshRejectsPermanentFailures(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			v.Pending = &pendingRefresh{Response: oauth.TokenResponse{AccessToken: "pending-access", RefreshToken: "pending-refresh", IDToken: signed(t, key, cl), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600}, ReceivedAt: received}
+			v.Pending = &pendingRefresh{Response: oauth.TokenResponse{AccessToken: "pending-access", RefreshToken: "pending-refresh", IDToken: testutil.SignRS256(t, key, cl), TokenType: "Bearer", Scope: scopeValue(oauth.Scope), ExpiresIn: 3600}, ReceivedAt: received}
 			switch name {
 			case "malformed ID token":
 				v.Pending.Response.IDToken = "malformed"
 			case "invalid signature":
-				v.Pending.Response.IDToken = signed(t, signingKey(t), cl)
+				v.Pending.Response.IDToken = testutil.SignRS256(t, testutil.NewRSAKey(t), cl)
 			case "incomplete response":
 				v.Pending.Response.TokenType = "unsupported"
 			}
@@ -330,7 +331,7 @@ func TestPendingRefreshRejectsPermanentFailures(t *testing.T) {
 				if r.URL.String() != jwksURL {
 					t.Fatal("invalid pending record caused refresh")
 				}
-				return jsonResponse(http.StatusOK, jwks(key))
+				return jsonResponse(http.StatusOK, testutil.RS256KeySet(key))
 			})
 			if token, err := c.Token(context.Background()); token != "" || !errors.Is(err, ErrAuth) {
 				t.Fatalf("invalid receipt/identity accepted: %v", err)
@@ -352,7 +353,7 @@ func TestRefreshRechecksExpiryAfterValidation(t *testing.T) {
 			now := received
 			c.now = func() time.Time { return now }
 			seed(t, c, received.Add(-time.Minute))
-			key := signingKey(t)
+			key := testutil.NewRSAKey(t)
 			cl := claims("")
 			cl["iat"] = received.Unix()
 			cl["exp"] = received.Add(time.Hour).Unix()
@@ -372,12 +373,12 @@ func TestRefreshRechecksExpiryAfterValidation(t *testing.T) {
 						t.Fatal("reused consumed refresh token")
 					}
 					if refreshes == 1 {
-						return jsonResponse(http.StatusOK, oauth.TokenResponse{AccessToken: "short-access", RefreshToken: "rotated-refresh", IDToken: signed(t, key, cl), TokenType: "Bearer", ExpiresIn: 1, Scope: scopeValue(oauth.Scope)})
+						return jsonResponse(http.StatusOK, oauth.TokenResponse{AccessToken: "short-access", RefreshToken: "rotated-refresh", IDToken: testutil.SignRS256(t, key, cl), TokenType: "Bearer", ExpiresIn: 1, Scope: scopeValue(oauth.Scope)})
 					}
 					return jsonResponse(http.StatusOK, oauth.TokenResponse{AccessToken: "fresh-access", RefreshToken: "fresh-refresh", TokenType: "Bearer", ExpiresIn: 3600, Scope: scopeValue(oauth.Scope)})
 				case jwksURL:
 					now = received.Add(delay)
-					return jsonResponse(http.StatusOK, jwks(key))
+					return jsonResponse(http.StatusOK, testutil.RS256KeySet(key))
 				default:
 					t.Fatal("unexpected request")
 					return nil, nil
@@ -526,19 +527,19 @@ func TestRefreshScopePresence(t *testing.T) {
 func TestOmittedRefreshScopeSurvivesPendingRecovery(t *testing.T) {
 	c := testClient(t)
 	seed(t, c, time.Now().Add(-time.Minute))
-	key := signingKey(t)
+	key := testutil.NewRSAKey(t)
 	var refreshes, fetches int
 	c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
 		switch r.URL.String() {
 		case tokenURL:
 			refreshes++
-			return jsonResponse(http.StatusOK, oauth.TokenResponse{AccessToken: "rotated-access", RefreshToken: "rotated-refresh", IDToken: signed(t, key, claims("")), TokenType: "Bearer", ExpiresIn: 3600})
+			return jsonResponse(http.StatusOK, oauth.TokenResponse{AccessToken: "rotated-access", RefreshToken: "rotated-refresh", IDToken: testutil.SignRS256(t, key, claims("")), TokenType: "Bearer", ExpiresIn: 3600})
 		case jwksURL:
 			fetches++
 			if fetches == 1 {
 				return nil, errors.New("temporary failure")
 			}
-			return jsonResponse(http.StatusOK, jwks(key))
+			return jsonResponse(http.StatusOK, testutil.RS256KeySet(key))
 		default:
 			t.Fatal("unexpected request")
 			return nil, nil
@@ -583,19 +584,19 @@ func TestRefreshMetadataDoesNotDiscardRotatedCredentials(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := testClient(t)
 			seed(t, c, time.Now().Add(-time.Minute))
-			key := signingKey(t)
+			key := testutil.NewRSAKey(t)
 			var refreshes, fetches int
 			c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
 				switch r.URL.String() {
 				case tokenURL:
 					refreshes++
-					return jsonResponse(http.StatusOK, map[string]any{"access_token": "rotated-access", "refresh_token": "rotated-refresh", "id_token": signed(t, key, claims("")), "token_type": "Bearer", "expires_in": 3600, "earliest_refresh_at": tc.hint})
+					return jsonResponse(http.StatusOK, map[string]any{"access_token": "rotated-access", "refresh_token": "rotated-refresh", "id_token": testutil.SignRS256(t, key, claims("")), "token_type": "Bearer", "expires_in": 3600, "earliest_refresh_at": tc.hint})
 				case jwksURL:
 					fetches++
 					if fetches == 1 {
 						return nil, errors.New("temporary JWKS failure")
 					}
-					return jsonResponse(http.StatusOK, jwks(key))
+					return jsonResponse(http.StatusOK, testutil.RS256KeySet(key))
 				default:
 					t.Fatal("unexpected request")
 					return nil, nil
@@ -627,7 +628,7 @@ func TestPendingRefreshRetainsCheckpointWhenKeysUnavailable(t *testing.T) {
 			now := time.Now().UTC().Truncate(time.Second)
 			c.now = func() time.Time { return now }
 			seed(t, c, now.Add(-time.Minute))
-			key := signingKey(t)
+			key := testutil.NewRSAKey(t)
 			v, err := c.loadCredential(c.selected)
 			if err != nil {
 				t.Fatal(err)
@@ -635,7 +636,7 @@ func TestPendingRefreshRetainsCheckpointWhenKeysUnavailable(t *testing.T) {
 			v.Pending = &pendingRefresh{
 				Response: oauth.TokenResponse{
 					AccessToken: "replacement", RefreshToken: "rotated",
-					IDToken: signed(t, key, claims("")), TokenType: "Bearer",
+					IDToken: testutil.SignRS256(t, key, claims("")), TokenType: "Bearer",
 					ExpiresIn: 3600, Scope: scopeValue(oauth.Scope),
 				},
 				ReceivedAt: now,
@@ -675,7 +676,7 @@ func TestPendingRefreshRetainsCheckpointWhenKeysUnavailable(t *testing.T) {
 				if r.URL.String() != jwksURL {
 					t.Error("recovery replayed the consumed refresh token")
 				}
-				return jsonResponse(http.StatusOK, jwks(key))
+				return jsonResponse(http.StatusOK, testutil.RS256KeySet(key))
 			})
 			if token, err := c.Token(t.Context()); err != nil || token != "replacement" {
 				t.Fatalf("recovery = %q, %v", token, err)
@@ -689,7 +690,7 @@ func TestRefreshPersistenceFailureProvidesRecoveryGuidance(t *testing.T) {
 		t.Run(stage, func(t *testing.T) {
 			c := testClient(t)
 			seed(t, c, time.Now().Add(-time.Minute))
-			key := signingKey(t)
+			key := testutil.NewRSAKey(t)
 			path := c.credentialPath(c.selected)
 			backup := path + ".backup"
 			blocked := false
@@ -725,14 +726,14 @@ func TestRefreshPersistenceFailureProvidesRecoveryGuidance(t *testing.T) {
 					}
 					return jsonResponse(http.StatusOK, oauth.TokenResponse{
 						AccessToken: "replacement", RefreshToken: "rotated",
-						IDToken: signed(t, key, claims("")), TokenType: "Bearer",
+						IDToken: testutil.SignRS256(t, key, claims("")), TokenType: "Bearer",
 						ExpiresIn: 3600, Scope: scopeValue(oauth.Scope),
 					})
 				case jwksURL:
 					if stage == "validated credentials" && !blocked {
 						blockWrite()
 					}
-					return jsonResponse(http.StatusOK, jwks(key))
+					return jsonResponse(http.StatusOK, testutil.RS256KeySet(key))
 				default:
 					t.Fatalf("unexpected request: %s", r.URL.Path)
 					return nil, nil
@@ -766,7 +767,7 @@ func TestRefreshPersistenceFailureProvidesRecoveryGuidance(t *testing.T) {
 				if r.URL.String() != jwksURL {
 					t.Error("recovery replayed a refresh")
 				}
-				return jsonResponse(http.StatusOK, jwks(key))
+				return jsonResponse(http.StatusOK, testutil.RS256KeySet(key))
 			})
 			if token, err := c.Token(t.Context()); err != nil || token != "replacement" || refreshes != 1 {
 				t.Fatalf("recovery = %q, %v; refreshes = %d", token, err, refreshes)
