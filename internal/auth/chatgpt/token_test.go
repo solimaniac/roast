@@ -3,7 +3,10 @@ package chatgpt
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
+	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -412,5 +415,362 @@ func assertClearedCredentials(t *testing.T, saved credential) {
 	t.Helper()
 	if saved.Pending != nil || saved.AccessToken != "" || saved.RefreshToken != "" || saved.IDToken != "" || saved.Scopes != "" || !saved.ExpiresAt.IsZero() || saved.EarliestRefreshAt != 0 {
 		t.Error("rejected credentials or refresh metadata remain stored")
+	}
+}
+
+func TestTransientOAuthFailurePreservesRefreshCredentials(t *testing.T) {
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			c := testClient(t)
+			seed(t, c, time.Now().Add(-time.Minute))
+			c.provider.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
+				return jsonResponse(status, map[string]string{"error": "invalid_grant"})
+			})
+			if token, err := c.Token(context.Background()); token != "" || !errors.Is(err, ErrNetwork) {
+				t.Fatalf("transient response misclassified: %v", err)
+			}
+			v, err := c.loadCredential(c.selected)
+			if err != nil || v.AccessToken != "access" || v.RefreshToken != "refresh" || v.Pending != nil {
+				t.Fatal("transient response erased credentials")
+			}
+		})
+	}
+}
+
+func TestBareUnauthorizedDoesNotEraseCredentials(t *testing.T) {
+	c := testClient(t)
+	seed(t, c, time.Now().Add(-time.Minute))
+	c.provider.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
+		return jsonResponse(http.StatusUnauthorized, map[string]string{"error": "unknown"})
+	})
+	if _, err := c.Token(context.Background()); !errors.Is(err, ErrAuth) {
+		t.Fatalf("wrong classification: %v", err)
+	}
+	v, err := c.loadCredential(c.selected)
+	if err != nil || v.RefreshToken != "refresh" {
+		t.Fatal("HTTP status alone erased refresh token")
+	}
+}
+
+func TestMalformedOAuthErrorDoesNotEraseCredentials(t *testing.T) {
+	for _, raw := range []string{
+		`{"error":{"code":"invalid_grant","code":42}}`,
+		`{"error":{"code":"invalid_grant","code":null}}`,
+		`{"error":"invalid_grant","extra":`,
+		`{"error":"invalid_grant"} trailing data`,
+		`{"error":"invalid_grant"}{}`,
+		`{"error":"invalid_grant"}` + strings.Repeat(" ", 1<<20),
+	} {
+		c := testClient(t)
+		seed(t, c, time.Now().Add(-time.Minute))
+		c.provider.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusBadRequest, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(raw))}, nil
+		})
+		if _, err := c.Token(context.Background()); !errors.Is(err, ErrAuth) || !strings.Contains(err.Error(), "oauth_error") {
+			t.Fatalf("malformed error retained a terminal category: %v", err)
+		}
+		v, err := c.loadCredential(c.selected)
+		if err != nil || v.AccessToken != "access" || v.RefreshToken != "refresh" {
+			t.Fatal("malformed error erased credentials")
+		}
+	}
+}
+
+func scopeValue(scope string) *string { return &scope }
+
+func TestRefreshScopePresence(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		scope   any
+		present bool
+		want    string
+	}{
+		{"omitted", nil, false, oauth.Scope},
+		{"null", nil, true, oauth.Scope},
+		{"unchanged", oauth.Scope, true, oauth.Scope},
+		{"reduced", "openid profile email", true, "openid profile email"},
+		{"empty", "", true, ""},
+		{"whitespace", " \t ", true, " \t "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := testClient(t)
+			seed(t, c, time.Now().Add(-time.Minute))
+			var calls int
+			c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+				calls++
+				if r.URL.String() != tokenURL {
+					t.Fatal("unexpected request")
+				}
+				data := map[string]any{"access_token": "rotated-access", "refresh_token": "rotated-refresh", "token_type": "Bearer", "expires_in": 3600}
+				if tc.present {
+					data["scope"] = tc.scope
+				}
+				return jsonResponse(http.StatusOK, data)
+			})
+			token, err := c.Token(context.Background())
+			if tc.want == oauth.Scope {
+				if err != nil || token != "rotated-access" {
+					t.Fatalf("unchanged grant lost: %v", err)
+				}
+			} else if !errors.Is(err, ErrAuth) || token != "" || !strings.Contains(err.Error(), "permission was removed") {
+				t.Fatalf("removed grant accepted: %v", err)
+			}
+			v, err := c.loadCredential(c.selected)
+			if err != nil || v.Scopes != tc.want || v.RefreshToken != "rotated-refresh" || v.Pending != nil || calls != 1 {
+				t.Fatalf("refresh result not committed correctly: %v", err)
+			}
+		})
+	}
+}
+
+func TestOmittedRefreshScopeSurvivesPendingRecovery(t *testing.T) {
+	c := testClient(t)
+	seed(t, c, time.Now().Add(-time.Minute))
+	key := signingKey(t)
+	var refreshes, fetches int
+	c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.String() {
+		case tokenURL:
+			refreshes++
+			return jsonResponse(http.StatusOK, oauth.TokenResponse{AccessToken: "rotated-access", RefreshToken: "rotated-refresh", IDToken: signed(t, key, claims("")), TokenType: "Bearer", ExpiresIn: 3600})
+		case jwksURL:
+			fetches++
+			if fetches == 1 {
+				return nil, errors.New("temporary failure")
+			}
+			return jsonResponse(http.StatusOK, jwks(key))
+		default:
+			t.Fatal("unexpected request")
+			return nil, nil
+		}
+	})
+	if token, err := c.Token(context.Background()); token != "" || !errors.Is(err, ErrNetwork) {
+		t.Fatalf("pending result escaped: %v", err)
+	}
+	v, err := c.loadCredential(c.selected)
+	if err != nil || v.Pending == nil || v.Pending.Response.Scope != nil || v.Scopes != oauth.Scope || v.Pending.Response.RefreshToken != "rotated-refresh" {
+		t.Fatal("pending response lost scope absence or rotation")
+	}
+	resumed := *c
+	if token, err := resumed.Token(context.Background()); err != nil || token != "rotated-access" || refreshes != 1 {
+		t.Fatalf("pending recovery failed: %v", err)
+	}
+	v, err = c.loadCredential(c.selected)
+	if err != nil || v.Scopes != oauth.Scope || v.Pending != nil || v.RefreshToken != "rotated-refresh" {
+		t.Fatal("pending scope was not preserved")
+	}
+}
+
+func TestInitialTokenDoesNotInheritScopes(t *testing.T) {
+	c := testClient(t)
+	v := credential{Scopes: oauth.Scope}
+	if err := v.applyTokenResponse(oauth.TokenResponse{IDToken: "identity-only"}, c.now()); err != nil || v.Scopes != "" {
+		t.Fatalf("initial authorization inherited an old grant: %v", err)
+	}
+}
+
+func TestRefreshMetadataDoesNotDiscardRotatedCredentials(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		hint any
+	}{
+		{"RFC3339", "2026-11-09T00:00:00Z"},
+		{"numeric string", "1794182400"},
+		{"invalid date", "not-a-date"},
+		{"unexpected object", map[string]any{"unexpected": true}},
+		{"null", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := testClient(t)
+			seed(t, c, time.Now().Add(-time.Minute))
+			key := signingKey(t)
+			var refreshes, fetches int
+			c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+				switch r.URL.String() {
+				case tokenURL:
+					refreshes++
+					return jsonResponse(http.StatusOK, map[string]any{"access_token": "rotated-access", "refresh_token": "rotated-refresh", "id_token": signed(t, key, claims("")), "token_type": "Bearer", "expires_in": 3600, "earliest_refresh_at": tc.hint})
+				case jwksURL:
+					fetches++
+					if fetches == 1 {
+						return nil, errors.New("temporary JWKS failure")
+					}
+					return jsonResponse(http.StatusOK, jwks(key))
+				default:
+					t.Fatal("unexpected request")
+					return nil, nil
+				}
+			})
+			if token, err := c.Token(context.Background()); token != "" || !errors.Is(err, ErrNetwork) {
+				t.Fatalf("pending credentials escaped or response lost: %v", err)
+			}
+			v, err := c.loadCredential(c.selected)
+			if err != nil || v.Pending == nil || v.Pending.Response.RefreshToken != "rotated-refresh" || v.AccessToken != "access" {
+				t.Fatal("rotated credentials were not checkpointed")
+			}
+			resumed := *c
+			if token, err := resumed.Token(context.Background()); err != nil || token != "rotated-access" || refreshes != 1 {
+				t.Fatalf("could not recover rotated credentials: %v", err)
+			}
+			v, err = c.loadCredential(c.selected)
+			if err != nil || v.Pending != nil || v.RefreshToken != "rotated-refresh" || v.Scopes != oauth.Scope {
+				t.Fatal("rotated credentials were not committed")
+			}
+		})
+	}
+}
+
+func TestPendingRefreshRetainsCheckpointWhenKeysUnavailable(t *testing.T) {
+	for _, name := range []string{"HTTP failure", "missing signing key"} {
+		t.Run(name, func(t *testing.T) {
+			c := testClient(t)
+			now := time.Now().UTC().Truncate(time.Second)
+			c.now = func() time.Time { return now }
+			seed(t, c, now.Add(-time.Minute))
+			key := signingKey(t)
+			v, err := c.loadCredential(c.selected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			v.Pending = &pendingRefresh{
+				Response: oauth.TokenResponse{
+					AccessToken: "replacement", RefreshToken: "rotated",
+					IDToken: signed(t, key, claims("")), TokenType: "Bearer",
+					ExpiresIn: 3600, Scope: scopeValue(oauth.Scope),
+				},
+				ReceivedAt: now,
+			}
+			if err := c.saveCredential(&v); err != nil {
+				t.Fatal(err)
+			}
+			before, err := c.loadCredential(c.selected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+				calls++
+				if r.URL.String() != jwksURL {
+					t.Error("pending recovery attempted another refresh")
+				}
+				if name == "HTTP failure" {
+					return jsonResponse(http.StatusForbidden, map[string]string{"error": "unavailable"})
+				}
+				return jsonResponse(http.StatusOK, map[string]any{"keys": []any{}})
+			})
+
+			token, err := c.Token(t.Context())
+
+			if token != "" || !errors.Is(err, ErrNetwork) || errors.Is(err, ErrAuth) || calls != 1 {
+				t.Fatalf("Token = %q, %v; requests = %d; want retryable key failure", token, err, calls)
+			}
+			after, err := c.loadCredential(c.selected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(after, before) {
+				t.Error("temporary key failure changed the durable checkpoint")
+			}
+			c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+				if r.URL.String() != jwksURL {
+					t.Error("recovery replayed the consumed refresh token")
+				}
+				return jsonResponse(http.StatusOK, jwks(key))
+			})
+			if token, err := c.Token(t.Context()); err != nil || token != "replacement" {
+				t.Fatalf("recovery = %q, %v", token, err)
+			}
+		})
+	}
+}
+
+func TestRefreshPersistenceFailureProvidesRecoveryGuidance(t *testing.T) {
+	for _, stage := range []string{"checkpoint", "validated credentials"} {
+		t.Run(stage, func(t *testing.T) {
+			c := testClient(t)
+			seed(t, c, time.Now().Add(-time.Minute))
+			key := signingKey(t)
+			path := c.credentialPath(c.selected)
+			backup := path + ".backup"
+			blocked := false
+			restore := func() {
+				if !blocked {
+					return
+				}
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(backup, path); err != nil {
+					t.Fatal(err)
+				}
+				blocked = false
+			}
+			t.Cleanup(restore)
+			blockWrite := func() {
+				if err := os.Rename(path, backup); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(path, 0700); err != nil {
+					t.Fatal(err)
+				}
+				blocked = true
+			}
+			refreshes := 0
+			c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+				switch r.URL.String() {
+				case tokenURL:
+					refreshes++
+					if stage == "checkpoint" {
+						blockWrite()
+					}
+					return jsonResponse(http.StatusOK, oauth.TokenResponse{
+						AccessToken: "replacement", RefreshToken: "rotated",
+						IDToken: signed(t, key, claims("")), TokenType: "Bearer",
+						ExpiresIn: 3600, Scope: scopeValue(oauth.Scope),
+					})
+				case jwksURL:
+					if stage == "validated credentials" && !blocked {
+						blockWrite()
+					}
+					return jsonResponse(http.StatusOK, jwks(key))
+				default:
+					t.Fatalf("unexpected request: %s", r.URL.Path)
+					return nil, nil
+				}
+			})
+
+			token, err := c.Token(t.Context())
+
+			if token != "" || err == nil || !strings.Contains(err.Error(), "repair credential storage") {
+				t.Fatalf("Token = %q, %v; want storage recovery guidance without a token", token, err)
+			}
+			if stage == "checkpoint" && !strings.Contains(err.Error(), "could not confirm local credential cleanup") {
+				t.Fatalf("failure incorrectly implies durable cleanup: %v", err)
+			}
+			restore()
+			saved, err := c.loadCredential(c.selected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stage == "checkpoint" {
+				// When both writes fail, the consumed old grant can remain on disk.
+				if saved.RefreshToken != "refresh" || saved.Pending != nil {
+					t.Error("unexpected state after failed checkpoint and cleanup")
+				}
+				return
+			}
+			if saved.Pending == nil || saved.Pending.Response.RefreshToken != "rotated" {
+				t.Fatal("failed final write lost the durable replacement")
+			}
+			c.provider.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+				if r.URL.String() != jwksURL {
+					t.Error("recovery replayed a refresh")
+				}
+				return jsonResponse(http.StatusOK, jwks(key))
+			})
+			if token, err := c.Token(t.Context()); err != nil || token != "replacement" || refreshes != 1 {
+				t.Fatalf("recovery = %q, %v; refreshes = %d", token, err, refreshes)
+			}
+		})
 	}
 }
