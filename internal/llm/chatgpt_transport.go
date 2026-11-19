@@ -30,6 +30,9 @@ func (t *chatGPTTransport) RoundTrip(original *http.Request) (*http.Response, er
 	if err != nil || resp == nil {
 		return resp, err
 	}
+	if resp.Body == nil {
+		resp.Body = http.NoBody
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		_ = resp.Body.Close()
@@ -44,8 +47,14 @@ func (t *chatGPTTransport) RoundTrip(original *http.Request) (*http.Response, er
 		owner.recordFailure(newChatGPTError(resp.StatusCode, resp.Header.Get("X-Request-Id"), data))
 		return resp, nil
 	}
-	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
-	if mediaType != "text/event-stream" {
+	if types := resp.Header.Values("Content-Type"); len(types) == 0 {
+		// The plan endpoint can omit Content-Type on an SSE response. Let
+		// capture and the SDK stream it through the usual completion checks.
+		if resp.Header == nil {
+			resp.Header = make(http.Header)
+		}
+		resp.Header.Set("Content-Type", "text/event-stream")
+	} else if mediaType, _, _ := mime.ParseMediaType(types[0]); mediaType != "text/event-stream" {
 		_ = resp.Body.Close()
 		return nil, owner.recordFailure(errors.New("ChatGPT returned a non-streaming response; no tools were executed"))
 	}
@@ -96,6 +105,7 @@ func (t *chatGPTTransport) prepareRequest(original *http.Request, call *chatGPTC
 	req.Body = io.NopCloser(bytes.NewReader(body))
 	req.ContentLength = int64(len(body))
 	req.GetBody = nil
+	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Del("OpenAI-Organization")
 	req.Header.Del("OpenAI-Project")

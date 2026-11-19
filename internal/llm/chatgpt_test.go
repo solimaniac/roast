@@ -71,6 +71,9 @@ func TestChatGPTNativeToolLoop(t *testing.T) {
 		if r.URL.String() != chatGPTBaseURL+"/responses" || r.Header.Get("Authorization") != "Bearer oauth-only" {
 			t.Fatal("wrong destination or credential")
 		}
+		if got := r.Header.Get("Accept"); got != "text/event-stream" {
+			t.Errorf("Accept = %q, want text/event-stream", got)
+		}
 		for _, h := range []string{"OpenAI-Organization", "OpenAI-Project", "X-Ambient"} {
 			if r.Header.Get(h) != "" {
 				t.Fatalf("ambient header %s leaked", h)
@@ -87,7 +90,11 @@ func TestChatGPTNativeToolLoop(t *testing.T) {
 		}
 		body := planStream(t, tool, args)
 		expectedCapture = append(expectedCapture, body)
-		return planResponse(body), nil
+		resp := planResponse(body)
+		if len(requests) == 1 {
+			resp.Header.Del("Content-Type")
+		}
+		return resp, nil
 	}))
 	var output struct{ Answer string }
 	reads := 0
@@ -134,7 +141,7 @@ func TestChatGPTNativeToolLoop(t *testing.T) {
 		if !ok || namespace["name"] != "roast" || namespace["type"] != "namespace" {
 			t.Fatalf("tools not namespaced: %#v", namespaces)
 		}
-		if captures[i].Protocol != "chatgpt" || !bytes.Equal(captures[i].Body, expectedCapture[i]) {
+		if captures[i].Protocol != "chatgpt" || captures[i].ContentType != "text/event-stream" || !bytes.Equal(captures[i].Body, expectedCapture[i]) {
 			t.Fatal("raw capture changed the server stream")
 		}
 	}
@@ -580,11 +587,28 @@ func TestChatGPTStreamAllowsCommentsCRLFAndMultilineData(t *testing.T) {
 }
 
 func TestChatGPTRejectsNonStreamingSuccess(t *testing.T) {
-	c := planTestClient(t, ClientConfig{}, planRoundTripper(func(*http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"status":"completed"}`))}, nil
-	}))
-	var out struct{ Answer string }
-	if err := c.CompleteStructured(t.Context(), "system", "user", "submit", &out); err == nil || !strings.Contains(err.Error(), "non-streaming") {
-		t.Fatalf("error=%v", err)
+	jsonResponse := func(header http.Header) *http.Response {
+		return &http.Response{StatusCode: http.StatusOK, Header: header, Body: io.NopCloser(strings.NewReader(`{"status":"completed"}`))}
+	}
+	for _, tc := range []struct {
+		name     string
+		response *http.Response
+		want     string
+	}{
+		{"JSON content type", jsonResponse(http.Header{"Content-Type": {"application/json"}}), "non-streaming"},
+		{"empty content type", jsonResponse(http.Header{"Content-Type": {""}}), "non-streaming"},
+		{"empty first content type", jsonResponse(http.Header{"Content-Type": {"", "application/json"}}), "non-streaming"},
+		{"no content type", jsonResponse(nil), "without response.completed"},
+		{"no content", &http.Response{StatusCode: http.StatusNoContent}, "without response.completed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := planTestClient(t, ClientConfig{}, planRoundTripper(func(*http.Request) (*http.Response, error) {
+				return tc.response, nil
+			}))
+			var out struct{ Answer string }
+			if err := c.CompleteStructured(t.Context(), "system", "user", "submit", &out); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error=%v, want %q", err, tc.want)
+			}
+		})
 	}
 }
